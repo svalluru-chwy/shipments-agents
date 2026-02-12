@@ -1,0 +1,82 @@
+[project]
+name = "shipments-agency-platform"
+version = "1.0.0"
+description = "Standalone Shipments Agency Platform - AI agents for Chewy shipment analysis and intervention"
+requires-python = ">=3.10"
+readme = "README.md"
+
+dependencies = [
+    # Core
+    "pyyaml>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+
+    # AWS / S3
+    "boto3>=1.26.0",
+
+    # OpenAI
+    "openai>=2.0.0",
+
+    # Data processing
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+
+    # API Gateway
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+
+    # Logging
+    "structlog>=23.1.0",
+    "rich>=13.3.0",
+]
+
+[project.optional-dependencies]
+snowflake = [
+    "snowflake-connector-python>=3.16.0",
+]
+dev = [
+    "pytest>=7.2.0",
+    "pytest-asyncio>=0.23.0",
+    "moto[s3]>=5.0.0",
+    "httpx>=0.27.0",
+    "black>=23.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.0.0",
+]
+all = [
+    "shipments-agency-platform[snowflake,dev]",
+]
+
+[project.scripts]
+shipments-gateway = "packages.gateway.main:main"
+shipments-extract = "packages.data_extraction.run_pipeline:main"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["packages*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["packages"]
+split-on-trailing-comma = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+disable_error_code = ["call-overload", "no-any-return", "union-attr", "import-untyped", "arg-type", "return-value", "attr-defined"]

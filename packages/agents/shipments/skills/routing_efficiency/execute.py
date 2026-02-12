@@ -1,0 +1,126 @@
+"""
+Routing Efficiency Skill - Analyzes arc distance and FC distance optimization.
+"""
+
+import json
+from typing import Dict, Any
+import statistics
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """Execute the routing efficiency skill."""
+    # Use shipment_inspector data which has ARC_DISTANCE and BEST_FC_ARC_DISTANCE
+    shipment_inspector = state.get("shipment_inspector", {})
+    records = shipment_inspector.get("data", []) if isinstance(shipment_inspector, dict) else []
+    
+    # Fallback to shipment_data if inspector not available
+    if not records:
+        shipment_data = state.get("shipment_data", {})
+        records = shipment_data.get("records", [])
+    
+    if not records:
+        return {"skill": "routing_efficiency", "error": "No shipment data", "grounded_metrics": {"total_shipments": 0}}
+    
+    # Analyze routing metrics
+    arc_distances = []
+    best_fc_distances = []
+    fc_distances = {}
+    arc_ranges = {}
+    
+    for record in records:
+        # Use ARC_DISTANCE and BEST_FC_ARC_DISTANCE from shipment_inspector
+        arc = record.get("ARC_DISTANCE")
+        best_fc_arc = record.get("BEST_FC_ARC_DISTANCE")
+        fc = record.get("FFMCENTER_NAME", "Unknown")
+        arc_range = record.get("ARC_RANGE", "Unknown")
+        
+        if arc: 
+            arc_distances.append(float(arc))
+            
+            # Track by FC
+            if fc not in fc_distances:
+                fc_distances[fc] = []
+            fc_distances[fc].append(float(arc))
+            
+        if best_fc_arc: 
+            best_fc_distances.append(float(best_fc_arc))
+            
+        # Track arc ranges
+        if arc_range not in arc_ranges:
+            arc_ranges[arc_range] = 0
+        arc_ranges[arc_range] += 1
+    
+    total = len(records)
+    avg_arc = round(statistics.mean(arc_distances), 2) if arc_distances else 0
+    avg_best_fc = round(statistics.mean(best_fc_distances), 2) if best_fc_distances else 0
+    
+    # Calculate efficiency: how close is actual routing to optimal?
+    if avg_best_fc > 0 and avg_arc > 0:
+        routing_efficiency_pct = round((avg_best_fc / avg_arc) * 100, 1)
+        avg_excess_miles = round(avg_arc - avg_best_fc, 2)
+    else:
+        # No data available
+        routing_efficiency_pct = 0
+        avg_excess_miles = 0
+    
+    # Determine status based on efficiency
+    if routing_efficiency_pct == 0:
+        routing_status = "NO_DATA"
+    elif routing_efficiency_pct >= 95:
+        routing_status = "OPTIMAL"
+    elif routing_efficiency_pct >= 85:
+        routing_status = "ACCEPTABLE"
+    else:
+        routing_status = "SUBOPTIMAL"
+    
+    # Primary FC
+    primary_fc = max(fc_distances.items(), key=lambda x: len(x[1]))[0] if fc_distances else "Unknown"
+    
+    # Build observations
+    observations = []
+    
+    if routing_efficiency_pct == 0:
+        observations.append("No arc distance data available for routing analysis")
+        observations.append(f"Analyzed {total} shipments")
+        observations.append(f"Primary FC: {primary_fc}")
+    else:
+        observations.append(f"Analyzed {total} shipments for routing efficiency")
+        observations.append(f"Average arc distance: {avg_arc} miles")
+        observations.append(f"Optimal FC arc distance: {avg_best_fc} miles")
+        observations.append(f"Routing efficiency: {routing_efficiency_pct}%")
+        observations.append(f"Average excess miles: {avg_excess_miles}")
+        observations.append(f"Primary FC: {primary_fc}")
+        observations.append(f"Routing status: {routing_status}")
+        
+        # Add arc range distribution
+        if arc_ranges:
+            for arc_range, count in sorted(arc_ranges.items(), key=lambda x: -x[1]):
+                pct = round((count / total) * 100, 1)
+                observations.append(f"{pct}% of shipments in {arc_range} mile range")
+    
+    result = {
+        "skill": "routing_efficiency",
+        "observations": observations,
+        "summary": {
+            "routing_efficiency_pct": routing_efficiency_pct,
+            "avg_arc_distance": avg_arc,
+            "avg_optimal_distance": avg_best_fc,
+            "avg_excess_miles": avg_excess_miles,
+            "primary_fc": primary_fc,
+            "routing_status": routing_status
+        },
+        "continued_analysis": f"Routing efficiency is {routing_status.lower().replace('_', ' ')} at {routing_efficiency_pct}% with {avg_excess_miles} excess miles on average." if routing_efficiency_pct > 0 else "No arc distance data available for routing analysis.",
+        "enhanced_next_steps": "Consider FC optimization to reduce excess miles." if routing_status == "SUBOPTIMAL" else ("Routing data not available." if routing_status == "NO_DATA" else "Routing is efficient."),
+        "grounded_metrics": {
+            "total_shipments": total,
+            "avg_arc_distance": avg_arc,
+            "avg_optimal_distance": avg_best_fc,
+            "routing_efficiency_pct": routing_efficiency_pct,
+            "avg_excess_miles": avg_excess_miles,
+            "primary_fc": primary_fc,
+            "routing_status": routing_status,
+            "arc_range_distribution": arc_ranges
+        }
+    }
+    
+    return result

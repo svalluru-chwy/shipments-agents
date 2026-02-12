@@ -1,0 +1,35 @@
+# Shipment Actions Agent Manifest
+name: shipment_actions
+version: "1.0.0"
+description: >
+  Action planning, prioritization, and consolidation.
+  Orchestrates Phase 3 skills (intervention, action prioritizer) and
+  Phase 4 (consolidator). Receives decoded signals as upstream data
+  and generates prioritized action plans for CS agents.
+
+agent_name: shipment_actions
+
+s3_sources:
+  - folder: shipment_agency_revised/decoded_signals
+    description: Phase 2 decoded signals output
+    required: true
+  - folder: data/customer_information_query
+    description: Customer profile for context in action planning
+    required: false
+
+required_env:
+  - OPENAI_API_KEY
+
+output_types:
+  - json
+  - markdown
+
+output_path_template: "{base_path}/{customer_id}/shipment_agency_revised/consolidated/"
+
+depends_on:
+  - shipment_decoder
+
+skills:
+  - shipment_intervention
+  - shipment_action_prioritizer
+  - shipment_consolidator

@@ -1,0 +1,57 @@
+# Shipment Signals Agent Manifest
+name: shipment_signals
+version: "1.0.0"
+description: >
+  Signal detection and extraction from shipment data.
+  Orchestrates Phase 1 skills (12 skills in parallel) covering
+  health check, delivery performance, carrier analysis, exceptions,
+  geographic patterns, timing, packages, routing, order behavior,
+  contact correlation, current orders, and signal generation.
+
+agent_name: shipment_signals
+
+s3_sources:
+  - folder: data/main_shipment_query
+    description: Core shipment records with tracking, dates, carriers, weights
+    required: true
+  - folder: data/customer_contacts_query
+    description: Customer contact history for correlation with shipment events
+    required: false
+  - folder: data/customer_zip_performance
+    description: Customer-level ZIP code delivery performance metrics
+    required: true
+  - folder: data/benchmark_zip_performance
+    description: Benchmark ZIP-level performance for peer comparison
+    required: true
+  - folder: data/shipment_inspector_query
+    description: Detailed shipment inspection data with exceptions
+    required: false
+  - folder: data/order_shipment_summary_stats
+    description: Order-level summary statistics for trend analysis
+    required: false
+
+required_env:
+  - OPENAI_API_KEY
+  - AWS_REGION
+
+output_types:
+  - json
+  - markdown
+
+output_path_template: "{base_path}/{customer_id}/shipment_agency_revised/signals/"
+
+depends_on: []
+
+skills:
+  - shipment_health_check
+  - delivery_performance
+  - carrier_analysis
+  - exception_analysis
+  - geographic_patterns
+  - timing_patterns
+  - package_analysis
+  - routing_efficiency
+  - order_behavior
+  - contact_correlation
+  - current_order
+  - shipment_signal_generator
