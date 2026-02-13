@@ -1,9 +1,15 @@
 """
 Standalone end-to-end pipeline test for Shipments Agency Platform.
 
-Runs all 3 agents (signals -> decoder -> actions) for a single customer
-WITHOUT the FastAPI gateway, uvicorn, or HTTP server. This is a direct Python
-invocation that replicates the PipelineOrchestrator's upstream-data-passing logic.
+Runs 2 agents (signals -> decoder) for a single customer WITHOUT the
+FastAPI gateway. This is a direct Python invocation that replicates
+the PipelineOrchestrator's upstream-data-passing logic.
+
+Pipeline:
+  1. ShipmentSignalsAgent: Check gate + Phase 1 (12 skills)
+  2. ShipmentDecoderAgent: Phase 2 (delay predictor + signal decoder)
+
+Phase 3-4 (actions/prioritization/consolidation) are NOT run.
 
 Usage:
     cd shipments-agents
@@ -35,7 +41,7 @@ from packages.shared.models import AgentRequest, AgentResponse, RunStatus
 from packages.shared.s3 import S3Client
 
 # ---------------------------------------------------------------------------
-# Pipeline order -- mirrors packages/gateway/orchestrator/pipeline.py
+# Pipeline order -- signals -> decoder only (no actions/prioritizer/consolidator)
 # ---------------------------------------------------------------------------
 
 PIPELINE_ORDER: List[Tuple[str, Dict[str, str]]] = [
@@ -46,27 +52,14 @@ PIPELINE_ORDER: List[Tuple[str, Dict[str, str]]] = [
             "skill_results": "skill_results",
             "signals_markdown": "signals_markdown",
             "shipment_data": "shipment_data",
-        },
-    ),
-    (
-        "shipment_actions",
-        {
-            "skill_results": "skill_results",
-            "decoded_markdown": "decoded_markdown",
-            "shipment_data": "shipment_data",
+            "check_gate": "check_gate",
         },
     ),
 ]
 
 
-def _snippet(text: str, max_len: int = 300) -> str:
-    if not text:
-        return "(empty)"
-    text = str(text).strip()
-    return text[:max_len] + ("..." if len(text) > max_len else "")
-
-
 def _save_agent_output(out_dir: str, agent_name: str, response: AgentResponse) -> None:
+    """Save agent outputs to local directory."""
     if response.result:
         path = os.path.join(out_dir, f"{agent_name}_result.json")
         with open(path, "w") as fh:
@@ -76,6 +69,22 @@ def _save_agent_output(out_dir: str, agent_name: str, response: AgentResponse) -
         path = os.path.join(out_dir, f"{agent_name}_structured.json")
         with open(path, "w") as fh:
             json.dump(response.structured_output, fh, indent=2, default=str)
+
+    # Save markdown output if present
+    result = response.result or {}
+    for md_key in ("signals_markdown", "decoded_markdown"):
+        md_content = result.get(md_key) or (response.structured_output or {}).get(md_key)
+        if md_content and isinstance(md_content, str):
+            path = os.path.join(out_dir, f"{agent_name}_{md_key}.md")
+            with open(path, "w") as fh:
+                fh.write(md_content)
+
+    # Save check gate result if present
+    check_gate = result.get("check_gate")
+    if check_gate:
+        path = os.path.join(out_dir, f"{agent_name}_check_gate.json")
+        with open(path, "w") as fh:
+            json.dump(check_gate, fh, indent=2, default=str)
 
 
 def _print_separator(label: str) -> None:
@@ -94,12 +103,17 @@ def _print_result(agent_name: str, response: AgentResponse, elapsed: float) -> N
     if response.error:
         print(f"  Error    : {response.error}")
 
-    if response.result:
-        s3_paths = response.result.get("s3_paths", {})
-        if s3_paths:
-            print(f"  S3 Paths :")
-            for k, v in s3_paths.items():
-                print(f"    {k}: {v}")
+    result = response.result or {}
+    s3_paths = result.get("s3_paths", {})
+    if s3_paths:
+        print(f"  S3 Paths :")
+        for k, v in s3_paths.items():
+            print(f"    {k}: {v}")
+
+    # Print check gate summary if present
+    check_gate = result.get("check_gate", {})
+    if check_gate:
+        print(f"  Check Gate: is_red={check_gate.get('is_red')}, severity={check_gate.get('severity')}")
 
     if response.structured_output:
         print(f"  Upstream keys: {list(response.structured_output.keys())}")
@@ -120,6 +134,7 @@ async def run_pipeline(customer_id: str) -> bool:
     print(f"  OPENAI_API_KEY : {'set' if os.getenv('OPENAI_API_KEY') else 'NOT SET'}")
     print(f"  S3 Bucket  : {settings.s3.bucket}")
     print(f"  S3 Base    : {settings.s3.base_path}")
+    print(f"  Pipeline   : signals -> decoder (no actions/prioritizer/consolidator)")
 
     # ---- Shared resources ------------------------------------------------
     print("\n  Initializing shared resources...")
@@ -127,33 +142,13 @@ async def run_pipeline(customer_id: str) -> bool:
     s3 = S3Client(bucket=settings.s3.bucket, region=settings.s3.region)
     print("    S3Client       : OK")
 
-    # ---- Step 0: Data Extraction -----------------------------------------
-    _print_separator(f"Step 0: Data Extraction -- Customer {customer_id}")
-    try:
-        from packages.data_extraction.runner.data_pipeline import CATDataPipeline
-
-        with CATDataPipeline(s3_client=s3) as pipeline:
-            extraction_summary = pipeline.run_all_queries(customer_id)
-
-        es = extraction_summary["execution_summary"]
-        print(f"  Queries: {es['successful_queries']}/{es['total_queries']} succeeded")
-        print(f"  Time:    {es['execution_time_seconds']:.1f}s")
-
-        if not extraction_summary["success"]:
-            failed_queries = [r["query_name"] for r in extraction_summary.get("query_results", []) if not r.get("success")]
-            print(f"  WARNING: Failed queries: {failed_queries}")
-            print(f"  Continuing with available data...")
-    except Exception as exc:
-        print(f"  Data extraction skipped/failed: {exc}")
-        print(f"  Proceeding with existing S3 data...")
-
     # ---- Instantiate agents -----------------------------------------------
-    from packages.agents.shipments import ShipmentSignalsAgent, ShipmentDecoderAgent, ShipmentActionsAgent
+    from packages.agents.shipments.signals import ShipmentSignalsAgent
+    from packages.agents.shipments.decoder import ShipmentDecoderAgent
 
     agents = {
         "shipment_signals": ShipmentSignalsAgent(s3_client=s3, settings=settings),
         "shipment_decoder": ShipmentDecoderAgent(s3_client=s3, settings=settings),
-        "shipment_actions": ShipmentActionsAgent(s3_client=s3, settings=settings),
     }
 
     print(f"\n  Agents instantiated: {list(agents.keys())}")
@@ -204,7 +199,8 @@ async def run_pipeline(customer_id: str) -> bool:
 
         if response.status == RunStatus.FAILED:
             logger.error(f"Agent '{agent_name}' failed: {response.error}")
-            print(f"\n  >> Agent failed but continuing pipeline (fail-forward) <<")
+            print(f"\n  >> Agent failed -- stopping pipeline <<")
+            break
 
     # ---- Summary ----------------------------------------------------------
     total_elapsed = time.time() - pipeline_start
@@ -219,7 +215,7 @@ async def run_pipeline(customer_id: str) -> bool:
 
     print(f"\n  Total time: {total_elapsed:.1f}s")
     if all_passed:
-        print("  Result: ALL 3 AGENTS PASSED")
+        print("  Result: ALL AGENTS PASSED")
     else:
         failed = [name for name, (resp, _) in results.items() if resp.status != RunStatus.COMPLETED]
         print(f"  Result: FAILED agents: {failed}")
@@ -230,6 +226,7 @@ async def run_pipeline(customer_id: str) -> bool:
         "timestamp": ts,
         "total_seconds": round(total_elapsed, 1),
         "all_passed": all_passed,
+        "pipeline": ["shipment_signals", "shipment_decoder"],
         "agents": {
             name: {
                 "status": resp.status.value,

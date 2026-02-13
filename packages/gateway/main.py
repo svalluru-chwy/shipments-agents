@@ -22,7 +22,8 @@ from packages.shared.config import get_settings
 from packages.shared.logging import get_logger
 from packages.shared.s3 import S3Client
 
-from packages.agents.shipments import ShipmentSignalsAgent, ShipmentDecoderAgent, ShipmentActionsAgent
+from packages.agents.shipments.signals import ShipmentSignalsAgent
+from packages.agents.shipments.decoder import ShipmentDecoderAgent
 from packages.gateway.registry import AgentRegistry
 from packages.gateway.orchestrator import PipelineOrchestrator
 from packages.gateway.routes import (
@@ -52,16 +53,14 @@ async def lifespan(app: FastAPI):
     app.state.s3_client = s3_client
     logger.info("S3Client initialized")
 
-    # 2. Instantiate agents
+    # 2. Instantiate agents (signals + decoder only; no actions/prioritizer/consolidator)
     shipment_signals = ShipmentSignalsAgent(s3_client=s3_client)
     shipment_decoder = ShipmentDecoderAgent(s3_client=s3_client)
-    shipment_actions = ShipmentActionsAgent(s3_client=s3_client)
 
     # 3. Register agents in AgentRegistry
     registry = AgentRegistry()
     registry.register(shipment_signals)
     registry.register(shipment_decoder)
-    registry.register(shipment_actions)
     app.state.registry = registry
     logger.info(f"Registered agents: {registry.list_agents()}")
 

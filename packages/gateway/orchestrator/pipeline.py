@@ -16,7 +16,10 @@ from packages.gateway.registry import AgentRegistry
 logger = get_logger(__name__)
 
 # Pipeline order: (agent_name, {upstream_output_key: downstream_input_key})
-# Empty dict for first agent; later agents receive merged upstream_data
+# Empty dict for first agent; later agents receive merged upstream_data.
+#
+# Phase 3-4 (actions/prioritization/consolidation) are NOT included.
+# The pipeline runs: signals (check gate + Phase 1) -> decoder (Phase 2).
 PIPELINE_ORDER: List[Tuple[str, Dict[str, str]]] = [
     ("shipment_signals", {}),
     (
@@ -25,14 +28,7 @@ PIPELINE_ORDER: List[Tuple[str, Dict[str, str]]] = [
             "skill_results": "skill_results",
             "signals_markdown": "signals_markdown",
             "shipment_data": "shipment_data",
-        },
-    ),
-    (
-        "shipment_actions",
-        {
-            "skill_results": "skill_results",
-            "decoded_markdown": "decoded_markdown",
-            "shipment_data": "shipment_data",
+            "check_gate": "check_gate",
         },
     ),
 ]
