@@ -4,9 +4,22 @@ Delivery Performance Skill - Analyzes CTD patterns and identifies delayed shipme
 
 import json
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 import statistics
+
+
+def _parse_date(val: Any) -> Optional[datetime]:
+    """Parse a date value (string or datetime) into a naive datetime."""
+    if val is None:
+        return None
+    try:
+        s = str(val)
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.strptime(s[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
 
 from openai import OpenAI
 from packages.agents.shipments.skills.loader import load_skill_instructions
@@ -33,6 +46,7 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     
     # Pre-calculate grounded metrics (no LLM needed for these)
     ctd_values = []
+    ctd_sources = []  # "actual" or "estimated" per CTD value
     delayed_shipments = []
     carrier_stats = {}
     fc_stats = {}
@@ -41,20 +55,37 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     
     for record in records:
         ctd = record.get("CLICK_TO_DELIVER_DAYS")
+        ctd_source = "actual"
+
+        if ctd is None:
+            # Estimated CTD fallback: compute from available dates
+            order_dt = _parse_date(record.get("ORDER_PLACED_DTTM"))
+            delivery_proxy = _parse_date(
+                record.get("BULK_TRACK_DELIVERY_DTTM")
+                or record.get("SHIPMENT_ESTIMATED_DELIVERY_DATE")
+                or record.get("WIZMO_CURRENT_ARRIVAL_DATE")
+                or record.get("LAST_EXPECTED_DELIVERY_DATE")
+            )
+            if order_dt and delivery_proxy:
+                ctd = (delivery_proxy - order_dt).days
+                ctd_source = "estimated"
+
         if ctd is not None:
             try:
                 ctd_val = float(ctd)
                 ctd_values.append(ctd_val)
+                ctd_sources.append(ctd_source)
                 
-                # Track delayed (S3 uses boolean true/null, not "Y" string)
-                if ctd_val > ctd_threshold or record.get("SHIPMENT_WAS_DELAYED") is True:
+                # Delayed = CTD exceeds threshold (pure CTD logic)
+                if ctd_val > ctd_threshold:
                     delayed_shipments.append({
                         "order_id": record.get("ORDER_ID"),
                         "tracking_number": record.get("SHIPMENT_TRACKING_NUMBER"),
                         "ctd_days": ctd_val,
+                        "ctd_source": ctd_source,
                         "carrier": record.get("WAREHOUSE_CARRIER"),
                         "fc": record.get("FFMCENTER_NAME"),
-                        "reason": "Exceeded threshold" if ctd_val > ctd_threshold else "Marked delayed"
+                        "reason": f"CTD {ctd_val} > threshold {ctd_threshold}"
                     })
                 
                 # Carrier stats
@@ -114,6 +145,11 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         trend_change = 0
         trend_direction = "INSUFFICIENT_DATA"
     
+    # Count CTD coverage
+    actual_ctd_count = ctd_sources.count("actual")
+    estimated_ctd_count = ctd_sources.count("estimated")
+    no_ctd_count = total - len(ctd_values)
+
     # Build grounded metrics
     grounded_metrics = {
         "total_shipments": total,
@@ -129,7 +165,10 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         "trend_direction": trend_direction,
         "by_carrier": carrier_summary,
         "by_fc": fc_summary,
-        "delay_definition": f"CTD > {ctd_threshold} days OR SHIPMENT_WAS_DELAYED=true"
+        "actual_ctd_count": actual_ctd_count,
+        "estimated_ctd_count": estimated_ctd_count,
+        "no_ctd_count": no_ctd_count,
+        "delay_definition": f"CTD > {ctd_threshold} days"
     }
     
     # Determine health status
@@ -141,11 +180,24 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         health = "CRITICAL"
     
     # Build observations
+    ctd_coverage = f"{actual_ctd_count} actual"
+    if estimated_ctd_count > 0:
+        ctd_coverage += f", {estimated_ctd_count} estimated"
+    if no_ctd_count > 0:
+        ctd_coverage += f", {no_ctd_count} without CTD"
     observations = [
-        f"Total shipments processed: {total}, all delivered.",
+        f"Total shipments processed: {total} ({ctd_coverage}).",
         f"Average Click-to-Deliver (CTD) time is {avg_ctd} days, with a maximum of {max_ctd} days.",
         f"{delayed_pct}% of shipments ({delayed_count} out of {total}) exceeded the {ctd_threshold}-day CTD threshold."
     ]
+    if estimated_ctd_count > 0:
+        observations.append(
+            f"Note: {estimated_ctd_count} shipment(s) used estimated CTD computed from expected delivery dates."
+        )
+    if no_ctd_count > 0:
+        observations.append(
+            f"Note: {no_ctd_count} shipment(s) have no CTD value and are excluded from analysis."
+        )
     
     # Add delayed shipment details
     for ds in delayed_shipments[:3]:  # Limit to first 3

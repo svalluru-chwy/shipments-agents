@@ -24,14 +24,32 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         exc_desc = str(record.get("BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION", "") or "")
         has_exception = exc_desc and exc_desc.lower() not in ("no exception", "", "none")
         is_delayed = record.get("SHIPMENT_WAS_DELAYED") is True
+        # Check for lost shipments
+        is_lost = record.get("SHIPMENT_WAS_LOST") is True
 
-        if has_exception or is_delayed:
+        if has_exception or is_delayed or is_lost:
+            # Determine exception type with priority:
+            #   1. Actual exception code/description (only when has_exception is True)
+            #   2. Lost shipment flag
+            #   3. Delayed flag
+            exc_type = ""
+            if has_exception:
+                exc_type = record.get("INITIAL_DELIVERY_ATTEMPT_EXCEPTION_CD") or exc_desc
+            if not exc_type:
+                if is_lost:
+                    exc_type = "Lost shipment"
+                elif is_delayed:
+                    exc_type = "Delayed (SHIPMENT_WAS_DELAYED)"
+                else:
+                    exc_type = "Unknown"
+
             exc = {
                 "order_id": record.get("ORDER_ID") or record.get("ORDERS_ORDER_ID"),
                 "tracking": record.get("SHIPMENT_TRACKING_NUMBER"),
                 "carrier": record.get("WAREHOUSE_CARRIER"),
-                "type": record.get("INITIAL_DELIVERY_ATTEMPT_EXCEPTION_CD") or exc_desc or "Delay",
-                "ctd": record.get("CLICK_TO_DELIVER_DAYS")
+                "type": exc_type,
+                "ctd": record.get("CLICK_TO_DELIVER_DAYS"),
+                "is_lost": is_lost
             }
             exceptions.append(exc)
             
@@ -44,10 +62,13 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     total = len(records)
     exception_count = len(exceptions)
     exception_rate = round((exception_count / total) * 100, 1) if total > 0 else 0
+    lost_count = len([e for e in exceptions if e.get("is_lost")])
     
     observations = [
         f"Total exceptions: {exception_count} out of {total} shipments ({exception_rate}%)"
     ]
+    if lost_count > 0:
+        observations.append(f"Lost shipments identified: {lost_count}")
     
     for exc in exceptions[:5]:
         observations.append(
@@ -69,9 +90,11 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             "total_shipments": total,
             "exception_count": exception_count,
             "exception_rate": exception_rate,
+            "lost_shipment_count": lost_count,
             "by_carrier": exception_by_carrier,
             "by_type": exception_by_type,
-            "exception_details": exceptions[:10]
+            "exception_details": exceptions[:10],
+            "exception_definition": "BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION or SHIPMENT_WAS_DELAYED=true or SHIPMENT_WAS_LOST=true"
         }
     }
     

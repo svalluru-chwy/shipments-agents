@@ -66,21 +66,47 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     now = datetime.now()
     
     for record in records:
-        # CRITICAL FIX: Use correct field name from S3 data
-        status = record.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION", "").upper()
+        # Status with fallback chain:
+        #   BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION -> SHIPMENT_STATUS -> WIZMO_CURRENT_PKG_STATUS
+        status = (
+            record.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
+            or record.get("SHIPMENT_STATUS")
+            or record.get("WIZMO_CURRENT_PKG_STATUS")
+            or ""
+        ).upper()
+
+        # Delivered check with fallback:
+        #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
+        #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
         delivery_date = record.get("BULK_TRACK_DELIVERY_DTTM")
+        is_delivered = delivery_date is not None
+        if not is_delivered:
+            shipment_status = (record.get("SHIPMENT_STATUS") or "").upper()
+            wizmo_status = (record.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
+            if shipment_status == "DELIVERED" or wizmo_status == "DELIVERED":
+                is_delivered = True
+
         ship_date = record.get("ACTUAL_SHIP_DATE")
+
+        # Expected delivery with fallback chain:
+        #   EXPECTED_DELIVERY_DATE -> SHIPMENT_ESTIMATED_DELIVERY_DATE
+        #   -> WIZMO_CURRENT_ARRIVAL_DATE -> LAST_EXPECTED_DELIVERY_DATE
+        expected_delivery = (
+            record.get("EXPECTED_DELIVERY_DATE")
+            or record.get("SHIPMENT_ESTIMATED_DELIVERY_DATE")
+            or record.get("WIZMO_CURRENT_ARRIVAL_DATE")
+            or record.get("LAST_EXPECTED_DELIVERY_DATE")
+        )
         
-        # Check if not delivered (delivery_date is None means still in transit)
-        # MUST be AND not OR: only include if delivery date is null AND status is not delivered
-        if delivery_date is None and status not in ["DELIVERED", "COMPLETE"]:
+        # Only classify as active if not delivered AND status is not a delivered variant
+        if not is_delivered and status not in ["DELIVERED", "COMPLETE"]:
             order = {
-                "order_id": record.get("ORDER_ID"),
+                "order_id": record.get("ORDER_ID") or record.get("ORDERS_ORDER_ID"),
                 "tracking": record.get("SHIPMENT_TRACKING_NUMBER"),
                 "carrier": record.get("WAREHOUSE_CARRIER"),
                 "status": status,
                 "ship_date": ship_date,
-                "expected_delivery": record.get("EXPECTED_DELIVERY_DATE")
+                "expected_delivery": expected_delivery
             }
             active_orders.append(order)
             
@@ -146,8 +172,15 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         f"Orders at risk (HIGH/CRITICAL): {total_at_risk}"
     ]
     
-    # Add delivery status context
-    delivered_count = len([r for r in records if r.get("BULK_TRACK_DELIVERY_DTTM")])
+    # Add delivery status context (with fallback to SHIPMENT_STATUS/WIZMO)
+    def _is_delivered(r: Dict[str, Any]) -> bool:
+        if r.get("BULK_TRACK_DELIVERY_DTTM") is not None:
+            return True
+        s = (r.get("SHIPMENT_STATUS") or "").upper()
+        w = (r.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
+        return s == "DELIVERED" or w == "DELIVERED"
+
+    delivered_count = len([r for r in records if _is_delivered(r)])
     if delivered_count == len(records):
         observations.append(f"All {delivered_count} shipments have been delivered")
     
@@ -186,7 +219,7 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         ),
         "grounded_metrics": {
             "total_shipments_analyzed": len(records),
-            "delivered_shipments": len([r for r in records if r.get("BULK_TRACK_DELIVERY_DTTM")]),
+            "delivered_shipments": delivered_count,
             "total_active_orders": total_active,
             "at_risk_orders": total_at_risk,
             "active_order_details": active_orders[:10],

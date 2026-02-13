@@ -80,6 +80,64 @@ Output ONLY valid JSON. No markdown, no code blocks, no additional text.
 """
 
 
+def _find_active_shipments(state: Dict[str, Any], target_result_key: str) -> list:
+    """
+    Locate active (undelivered / in-transit) shipments from the best available
+    source in state.
+
+    Lookup order:
+      1. state[target_result_key].active_shipments  (original cat-agents path)
+      2. state["current_order_result"]["grounded_metrics"]["active_order_details"]
+         (Phase 1 result injected by the runner between phases)
+      3. state["shipment_data"]["records"] filtered for undelivered records
+
+    Returns a list of dicts, each representing one active shipment.
+    """
+    # --- Source 1: original shipments_result key ---
+    shipments_result = state.get(target_result_key)
+    if shipments_result:
+        if hasattr(shipments_result, "active_shipments") and shipments_result.active_shipments:
+            return list(shipments_result.active_shipments)
+        if isinstance(shipments_result, dict) and shipments_result.get("active_shipments"):
+            return list(shipments_result["active_shipments"])
+
+    # --- Source 2: Phase 1 current_order skill result ---
+    current_order = state.get("current_order_result")
+    if isinstance(current_order, dict):
+        metrics = current_order.get("grounded_metrics", {})
+        details = metrics.get("active_order_details") or []
+        if details:
+            return list(details)
+
+    # --- Source 3: raw shipment records, filtered for in-transit ---
+    shipment_data = state.get("shipment_data", {})
+    records = shipment_data.get("records", [])
+    active = []
+    for r in records:
+        # Delivered check with fallback chain:
+        #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
+        #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
+        delivery_date = r.get("BULK_TRACK_DELIVERY_DTTM")
+        is_delivered = delivery_date is not None
+        if not is_delivered:
+            shipment_status = (r.get("SHIPMENT_STATUS") or "").upper()
+            wizmo_status = (r.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
+            if shipment_status == "DELIVERED" or wizmo_status == "DELIVERED":
+                is_delivered = True
+
+        # Status fallback chain for filtering
+        status = (
+            r.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
+            or r.get("SHIPMENT_STATUS")
+            or r.get("WIZMO_CURRENT_PKG_STATUS")
+            or ""
+        ).upper()
+
+        if not is_delivered and status not in ("DELIVERED", "COMPLETE"):
+            active.append(r)
+    return active
+
+
 def execute(state: Dict[str, Any], target_result_key: str, peer_level: str = "SEGMENT") -> Optional[Dict[str, Any]]:
     """
     Execute delay prediction for shipments in the target result.
@@ -95,22 +153,24 @@ def execute(state: Dict[str, Any], target_result_key: str, peer_level: str = "SE
     customer_id = state.get("customer_id")
     prompt_logger = state.get("prompt_logger")
     
-    # Get shipments from state
-    shipments_result = state.get(target_result_key)
-    if not shipments_result:
-        print(f"  ⚠ No {target_result_key} found to enhance")
-        return None
-    
-    # Get active shipments that need prediction
-    active_shipments = []
-    if hasattr(shipments_result, 'active_shipments'):
-        active_shipments = shipments_result.active_shipments
-    elif isinstance(shipments_result, dict) and 'active_shipments' in shipments_result:
-        active_shipments = shipments_result['active_shipments']
+    # Resolve active shipments from multiple possible state locations
+    active_shipments = _find_active_shipments(state, target_result_key)
     
     if not active_shipments:
-        print(f"  ⚠ No active shipments to analyze")
-        return None
+        # All shipments delivered -- return a clean result instead of None
+        return {
+            "skill": "shipment_delay_predictor",
+            "status": "no_active_shipments",
+            "observations": [
+                "No active or in-transit shipments found to predict delays for.",
+                "All shipments appear to have been delivered.",
+            ],
+            "delay_predictions": [],
+            "grounded_metrics": {
+                "active_shipments_count": 0,
+                "predictions_made": 0,
+            },
+        }
     
     # Load shared context
     context = load_shared_context()

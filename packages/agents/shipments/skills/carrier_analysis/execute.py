@@ -3,8 +3,22 @@ Carrier Analysis Skill - Analyzes carrier performance patterns.
 """
 
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from datetime import datetime
 import statistics
+
+
+def _parse_date(val: Any) -> Optional[datetime]:
+    """Parse a date value (string or datetime) into a naive datetime."""
+    if val is None:
+        return None
+    try:
+        s = str(val)
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.strptime(s[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
 
 
 def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
@@ -40,13 +54,25 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             }
         
         carrier_stats[carrier]["count"] += 1
+
+        # Estimated CTD fallback for records without CLICK_TO_DELIVER_DAYS
+        if ctd is None:
+            order_dt = _parse_date(record.get("ORDER_PLACED_DTTM"))
+            delivery_proxy = _parse_date(
+                record.get("BULK_TRACK_DELIVERY_DTTM")
+                or record.get("SHIPMENT_ESTIMATED_DELIVERY_DATE")
+                or record.get("WIZMO_CURRENT_ARRIVAL_DATE")
+                or record.get("LAST_EXPECTED_DELIVERY_DATE")
+            )
+            if order_dt and delivery_proxy:
+                ctd = (delivery_proxy - order_dt).days
         
         if ctd is not None:
             try:
                 ctd_val = float(ctd)
                 carrier_stats[carrier]["ctd_values"].append(ctd_val)
-                # S3 uses boolean true/null for delayed flag, not "Y" string
-                if ctd_val > ctd_threshold or record.get("SHIPMENT_WAS_DELAYED") is True:
+                # Delayed = CTD exceeds threshold (pure CTD logic)
+                if ctd_val > ctd_threshold:
                     carrier_stats[carrier]["delayed"] += 1
             except (ValueError, TypeError):
                 pass

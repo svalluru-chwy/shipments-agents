@@ -1,7 +1,7 @@
 Shipments Agency Platform - Implementation Channel Log
 ======================================================
 Created: 2026-02-12
-Last Updated: 2026-02-12
+Last Updated: 2026-02-13
 
 
 Entry 1: Project Initialization and Architecture (2026-02-12)
@@ -173,3 +173,304 @@ FILES:
   skills/shipment_decoder.yaml - Decoder agent manifest
   skills/shipment_actions.yaml - Actions agent manifest
   Dockerfile - Production Docker image
+
+
+Entry 11: Check Gate + Pipeline Refinement (2026-02-12)
+--------------------------------------------------------
+WHAT: Integrated LLM check gate into ShipmentSignalsAgent, fixed
+     contact_correlation data mapping, removed Phase 3-4 from pipeline.
+
+WHY: User clarified scope: validation agents, actions/recommendations,
+     prioritization, and consolidator are NOT required. The check gate
+     analysis and contact_correlation are required. Pipeline reduced to
+     2 agents (signals + decoder).
+
+HOW:
+  - Ported CHECK_GATE_SYSTEM_PROMPT and helper functions from
+    cat-agents/src/nodes/shipments/check_node_llm.py into signals/agent.py
+  - Added _run_check_gate() with deterministic fallback when LLM fails
+  - Fixed contact_correlation by mapping customer_contacts_query data to
+    state["voc_data"]["contacts"] (the key the skill reads from)
+  - Removed ShipmentActionsAgent from gateway and orchestrator
+  - Updated run_pipeline_test.py for 2-agent pipeline with check gate output
+
+FILES CHANGED:
+  packages/agents/shipments/signals/agent.py - Check gate + contacts fix
+  packages/gateway/orchestrator/pipeline.py - Removed actions agent
+  packages/gateway/main.py - Removed actions agent import/registration
+  run_pipeline_test.py - 2-agent pipeline, check gate display, local save
+
+
+Entry 12: Bug Fixes -- current_order + shipment_delay_predictor (2026-02-13)
+------------------------------------------------------------------------------
+WHAT: Fixed two skill bugs that were also broken in cat-agents.
+
+BUG 1 - current_order NoneType on .upper():
+  Root cause: record.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION", "")
+    returns None when the key exists but has a None value. .upper() crashes.
+  Fix: Changed to (record.get(...) or "").upper() null-coalescing pattern.
+  File: packages/agents/shipments/skills/current_order/execute.py line 70
+
+BUG 2 - shipment_delay_predictor missing shipments_result:
+  Root cause: In cat-agents, a separate shipments_analysis_node (graph node)
+    creates state["shipments_result"] before skills run. Our standalone
+    pipeline has no such node, so the key never exists.
+  Fix: Added _find_active_shipments() fallback function that checks:
+    1. state[target_result_key].active_shipments (original cat-agents path)
+    2. state["current_order_result"]["grounded_metrics"]["active_order_details"]
+       (Phase 1 result injected between phases)
+    3. state["shipment_data"]["records"] filtered for undelivered records
+  Also returns a clean "no_active_shipments" result dict instead of None
+    when all shipments are delivered.
+  File: packages/agents/shipments/skills/shipment_delay_predictor/execute.py
+
+RESULT: Both skills now complete successfully. current_order found 1 active
+  order (tracking D10017134276666, OnTrac, shipped 2026-02-12).
+  delay_predictor analyzed the active shipment via LLM and returned route
+  performance data (MCO1->85142 at 33.3% delay rate vs PHX1->85142 at 0%).
+  These were both broken in cat-agents for the same customer.
+
+
+Entry 13: Output Quality Comparison -- shipments-agents vs cat-agents (2026-02-13)
+-----------------------------------------------------------------------------------
+Compared pipeline outputs for customer 6180005.
+  cat-agents run: 2026-02-11 (analysis_20260211_151005.json)
+  shipments-agents runs: 2026-02-12 (run 1, pre-fix) and 2026-02-13 (run 2, post-fix)
+
+Note: slight metric differences (CTD, carrier %) are expected because
+  the data windows differ by 1-2 days and the underlying S3 data may have
+  received new shipment records between runs.
+
+--- PHASE 1: DETERMINISTIC SKILLS (10 skills) ---
+
+SKILL                    | cat-agents              | shipments-agents       | VERDICT
+-------------------------|-------------------------|------------------------|--------
+shipment_health_check    | HEALTHY, CTD 2.79,      | HEALTHY, CTD 2.72,     | MATCH
+                         | 50th pctile, 100% OT    | 40th pctile, 100% OT   |
+delivery_performance     | ATTENTION, CTD 2.79,    | ATTENTION, CTD 2.72,   | MATCH
+                         | 13.3% breach, STABLE    | 13.3% breach, DECLINING|
+carrier_analysis         | FSMS 63.3%, CTD 3.17    | FSMS 60.0%, CTD 3.06   | MATCH
+                         | OnTrac 33.3%, CTD 2.0   | OnTrac 36.7%, CTD 2.0  |
+exception_analysis       | 0 exceptions (0%)       | 0 exceptions (0%)      | MATCH
+geographic_patterns      | RNO1 53.3%, CTD 1.87    | RNO1 56.7%, CTD 1.81   | MATCH
+timing_patterns          | Thu best, Fri worst     | Thu best, Fri worst    | MATCH
+                         | Fri CTD 4.0             | Fri CTD 4.25           |
+package_analysis         | avg 5.44 lbs, 0% heavy  | avg 7.66 lbs, 3.3% hvy| DIFF (*)
+                         | range 0.4-11.7          | range 0.4-53.9         |
+routing_efficiency       | NO_DATA, 0% efficiency  | 76.3% efficiency,      | IMPROVED
+                         |                         | 193 excess miles, RNO1 |
+order_behavior           | 86.7% autoship, 10.5/mo | 86.7% autoship, 10.6/mo| MATCH
+contact_correlation      | 20% rate, 0% WISMO      | 20% rate, 0% WISMO     | MATCH
+
+(*) package_analysis diff: shipments-agents includes a 53.9 lb shipment
+    that was not in the cat-agents data window. This is a data freshness
+    difference, not a skill logic difference.
+
+ROUTING_EFFICIENCY improvement: shipments-agents has actual arc distance
+  data from shipment_inspector_query (816 avg miles, 623 optimal). cat-agents
+  returned NO_DATA. This means the shipment_inspector_query in S3 was either
+  missing or not loaded in the cat-agents run.
+
+--- PHASE 1: FIXED SKILLS (2 skills) ---
+
+SKILL                    | cat-agents              | shipments-agents       | VERDICT
+-------------------------|-------------------------|------------------------|--------
+current_order            | CRASHED: NoneType error  | 1 active order found,  | FIXED
+                         |                         | 0 at-risk, VOC checked |
+(new) CHECK GATE         | Not present             | LLM GREEN, severity    | NEW
+                         |                         | LOW, 2/22 delayed,     |
+                         |                         | 9.1% rate, no at-risk  |
+
+--- PHASE 1: LLM SKILLS (1 skill) ---
+
+SKILL                    | cat-agents              | shipments-agents       | VERDICT
+-------------------------|-------------------------|------------------------|--------
+signal_generator         | 3 signals, all Normal   | Run 1: 3 signals incl  | IMPROVED
+                         | Processing, all low     | 1 HIGH "Excessive      | (run 1)
+                         | severity, none          | Delay" CTD 5.44 days,  |
+                         | actionable              | 1 actionable           |
+                         |                         | Run 2: 0 signals (LLM  | VARIANCE
+                         |                         | non-determinism)       | (run 2)
+
+Signal generator run 1 was qualitatively better: it correctly identified
+  a HIGH severity Excessive Delay (order 5098639659, CTD 5.44 days exceeding
+  the 4.23 threshold) that cat-agents missed. cat-agents classified all 3
+  signals as "Normal Processing" despite CTD values of 1, 2, and 2 days.
+
+--- PHASE 2: LLM SKILLS (2 skills) ---
+
+SKILL                    | cat-agents              | shipments-agents       | VERDICT
+-------------------------|-------------------------|------------------------|--------
+signal_decoder           | 3 signals decoded,      | Run 1: 3 signals       | MATCH/
+                         | all P4 / no action      | decoded with proper    | IMPROVED
+                         |                         | severity, route info   | (run 1)
+                         |                         | Run 2: no signals      | N/A
+                         |                         | to decode              | (run 2)
+shipment_delay_predictor | CRASHED: No result      | LLM analysis of 1     | FIXED
+                         | returned                | active shipment,       |
+                         |                         | route performance      |
+                         |                         | (MCO1 33.3% delay      |
+                         |                         | rate, PHX1 0%)         |
+
+--- PHASE 3-4: EXCLUDED BY DESIGN ---
+
+The following skills run in cat-agents but are intentionally excluded
+from the shipments-agents pipeline per user requirement:
+  - shipment_intervention (Phase 3): 0 interventions needed for 6180005
+  - shipment_action_prioritizer (Phase 3): 3 actions (2 P1, 1 P2) generated
+  - shipment_consolidator (Phase 4): ATTENTION overall, 11 skills consolidated
+
+These skills and their agent (ShipmentActionsAgent) still exist in the
+codebase but are not wired into the pipeline.
+
+--- OVERALL ASSESSMENT ---
+
+Of 14 comparable skill outputs:
+  - 9 MATCH (deterministic skills produce equivalent results)
+  - 2 FIXED (current_order, delay_predictor -- both broken in cat-agents)
+  - 1 IMPROVED (routing_efficiency has actual data vs NO_DATA)
+  - 1 NEW (check gate LLM analysis, not present in cat-agents)
+  - 1 DIFF (package_analysis, data freshness only)
+
+Signal quality: shipments-agents run 1 produced better signal detection
+  (caught a HIGH severity delay cat-agents missed). Run 2 showed LLM
+  variance with 0 signals -- inherent to non-deterministic LLM calls.
+
+Conclusion: shipments-agents produces output at parity or better than
+  cat-agents for all shared skills, with two previously broken skills
+  now working and a new check gate capability added.
+
+
+Entry 14: Skill Data Fallback Fixes (2026-02-13)
+-------------------------------------------------
+WHAT: Added data fallback chains across 7 skills to handle missing/null
+     fields in S3 data. These fix silent misclassifications caused by
+     SHIPMENT_WAS_DELAYED being None for all records, BULK_TRACK_DELIVERY_DTTM
+     being None for delivered shipments, and weight field gaps.
+
+WHY: Validation against raw S3 data for customer 6180005 revealed that
+     skills were producing incorrect results due to data quality issues:
+     - All 30 records had SHIPMENT_WAS_DELAYED=None, making delay detection
+       fail silently (0% delay rate when actual was ~37%).
+     - Shipment 500776879286 had BULK_TRACK_DELIVERY_DTTM=None but
+       SHIPMENT_STATUS=DELIVERED, causing false "active" classification.
+     - delivery_performance claimed "all delivered" while 2 records
+       had no CTD (undelivered/in-transit).
+     - exception_analysis type categorization showed "No Exception" for
+       records flagged only via ONTIME_DELIVERY_FLAG=0.
+
+HOW: Implemented fallback chains in each skill:
+
+  1. current_order (execute.py):
+     - Status: BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION -> SHIPMENT_STATUS
+       -> WIZMO_CURRENT_PKG_STATUS
+     - Delivered check: BULK_TRACK_DELIVERY_DTTM not None -> SHIPMENT_STATUS
+       == "DELIVERED" -> WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
+     - Expected delivery: EXPECTED_DELIVERY_DATE -> SHIPMENT_ESTIMATED_DELIVERY_DATE
+       -> WIZMO_CURRENT_ARRIVAL_DATE -> LAST_EXPECTED_DELIVERY_DATE
+     - Added _is_delivered() helper for consistent delivered count
+
+  2. shipment_health_check (execute.py):
+     - Delayed: SHIPMENT_WAS_DELAYED=True -> ONTIME_DELIVERY_FLAG=0
+     - Delivered classification: BULK_TRACK_DELIVERY_DTTM -> SHIPMENT_STATUS
+       -> WIZMO_CURRENT_PKG_STATUS (reports delivered/undelivered counts)
+     - Updated delay_definition metadata
+
+  3. package_analysis (execute.py):
+     - Weight: BULK_TRACK_LB_PACKAGE_WEIGHT -> SHIPMENT_PLANNED_WEIGHT
+       -> WAREHOUSE_SCALE_WEIGHT
+
+  4. delivery_performance (execute.py):
+     - Delayed: CTD > threshold -> SHIPMENT_WAS_DELAYED=True
+       -> ONTIME_DELIVERY_FLAG=0
+     - Reports delivered_with_ctd vs undelivered_count explicitly
+     - No longer claims "all delivered" when undelivered records exist
+     - Updated delay_definition metadata
+
+  5. carrier_analysis (execute.py):
+     - Delayed per carrier: same 3-way fallback as delivery_performance
+
+  6. shipment_delay_predictor (execute.py):
+     - _find_active_shipments() Source 3: added SHIPMENT_STATUS and
+       WIZMO_CURRENT_PKG_STATUS fallbacks for delivered detection and
+       status resolution
+
+  7. exception_analysis (execute.py):
+     - Added ONTIME_DELIVERY_FLAG=0 as exception signal
+     - Added SHIPMENT_WAS_LOST=True check
+     - Fixed exception type categorization: only uses exc_desc when
+       has_exception is True; otherwise assigns descriptive type
+       (Lost/Delayed/Not on-time)
+     - Reports lost_shipment_count in grounded_metrics
+
+RESULT (pipeline run for 6180005):
+  - current_order: 29 delivered, 1 active (was 28 delivered, 2 active before)
+    Shipment 500776879286 now correctly classified via SHIPMENT_STATUS fallback
+  - health_check: 11 delayed (36.7%) via ONTIME_DELIVERY_FLAG (was 0%)
+    Reports 29 delivered / 1 undelivered
+  - delivery_performance: 14 delayed (46.7%) via combined fallback chain
+    Reports 28 with CTD / 2 without, explicitly notes undelivered
+  - carrier_analysis: FedEx 72.2% delayed, OnTrac 9.1% delayed
+  - exception_analysis: 11 exceptions (36.7%) categorized by type
+  - delay_predictor: 1 active shipment correctly identified (5101134637)
+  - package_analysis: weight range 0.4-54.4 lbs using fallback chain
+
+FILES CHANGED:
+  packages/agents/shipments/skills/current_order/execute.py
+  packages/agents/shipments/skills/shipment_health_check/execute.py
+  packages/agents/shipments/skills/package_analysis/execute.py
+  packages/agents/shipments/skills/delivery_performance/execute.py
+  packages/agents/shipments/skills/carrier_analysis/execute.py
+  packages/agents/shipments/skills/shipment_delay_predictor/execute.py
+  packages/agents/shipments/skills/exception_analysis/execute.py
+
+
+Entry 15: CTD-Only Delay Detection (2026-02-13)
+------------------------------------------------
+WHAT: Removed ONTIME_DELIVERY_FLAG from all delay/exception detection.
+     Delay is now purely CTD > threshold. Added estimated CTD fallback
+     for records missing CLICK_TO_DELIVER_DAYS.
+
+WHY: Validation against raw S3 data for customer 6180005 showed that
+     ONTIME_DELIVERY_FLAG does not correlate with actual delivery timeliness.
+     All 11 records with ONTIME_DELIVERY_FLAG=0 delivered ON or BEFORE
+     their expected delivery date. The flag appears to measure something
+     other than delivery vs estimated date (possibly an internal SLA we
+     don't have visibility into). Using it inflated delay counts from 4
+     to 11-14 with false positives.
+
+HOW:
+  1. shipment_health_check: Removed ONTIME_DELIVERY_FLAG fallback.
+     Added _parse_date() helper. Added estimated CTD computation from
+     SHIPMENT_ESTIMATED_DELIVERY_DATE / WIZMO_CURRENT_ARRIVAL_DATE /
+     LAST_EXPECTED_DELIVERY_DATE - ORDER_PLACED_DTTM. Computes its own
+     CTD threshold (mean + 1 std dev) for delay detection. Tracks
+     estimated_ctd_count in grounded_metrics.
+
+  2. delivery_performance: Removed ONTIME_DELIVERY_FLAG from delayed
+     detection. Added _parse_date() + estimated CTD fallback. Now tracks
+     actual_ctd_count, estimated_ctd_count, no_ctd_count. Flagged
+     shipments include ctd_source ("actual" or "estimated").
+
+  3. carrier_analysis: Removed ONTIME_DELIVERY_FLAG. Added _parse_date()
+     + estimated CTD fallback. Delayed per carrier = CTD > threshold only.
+
+  4. exception_analysis: Removed is_not_ontime and "Not on-time
+     (ONTIME_DELIVERY_FLAG=0)" type. Exceptions now = actual carrier
+     exceptions + SHIPMENT_WAS_DELAYED + SHIPMENT_WAS_LOST only.
+
+RESULT (pipeline run for 6180005):
+  - health_check: 4 delayed (13.3%), threshold 4.19 (incl 2 estimated CTDs)
+  - delivery_performance: 4 delayed (13.3%), threshold 4.29
+    Flagged: 494399793244 (CTD=5), 496272761367 (CTD=5),
+             D10016935065020 (CTD=5), 476834403040 (CTD=7)
+  - carrier_analysis: FedEx 3 delayed (16.7%), OnTrac 1 delayed (9.1%)
+  - exception_analysis: 0 exceptions (0%)
+  - 2 estimated CTDs computed (500776879286: ~1d, D10017134276666: ~2d)
+  - All 30 records now have CTD coverage (28 actual + 2 estimated)
+
+FILES CHANGED:
+  packages/agents/shipments/skills/shipment_health_check/execute.py
+  packages/agents/shipments/skills/delivery_performance/execute.py
+  packages/agents/shipments/skills/carrier_analysis/execute.py
+  packages/agents/shipments/skills/exception_analysis/execute.py

@@ -5,9 +5,22 @@ Computes customer delivery performance vs ZIP benchmark.
 """
 
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import statistics
+
+
+def _parse_date(val: Any) -> Optional[datetime]:
+    """Parse a date value (string or datetime) into a naive datetime."""
+    if val is None:
+        return None
+    try:
+        s = str(val)
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.strptime(s[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
 
 
 def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
@@ -34,27 +47,42 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     
     # Calculate customer performance metrics
     ctd_values = []
-    delayed_count = 0
+    ctd_sources = []  # Track whether each CTD is "actual" or "estimated"
     exception_count = 0
     dates = []
-    
+
     for record in records:
         ctd = record.get("CLICK_TO_DELIVER_DAYS")
+        ctd_source = "actual"
+
+        if ctd is None:
+            # Estimated CTD fallback: compute from available dates
+            #   delivery proxy: BULK_TRACK_DELIVERY_DTTM -> SHIPMENT_ESTIMATED_DELIVERY_DATE
+            #                   -> WIZMO_CURRENT_ARRIVAL_DATE -> LAST_EXPECTED_DELIVERY_DATE
+            #   order date: ORDER_PLACED_DTTM
+            order_dt = _parse_date(record.get("ORDER_PLACED_DTTM"))
+            delivery_proxy = _parse_date(
+                record.get("BULK_TRACK_DELIVERY_DTTM")
+                or record.get("SHIPMENT_ESTIMATED_DELIVERY_DATE")
+                or record.get("WIZMO_CURRENT_ARRIVAL_DATE")
+                or record.get("LAST_EXPECTED_DELIVERY_DATE")
+            )
+            if order_dt and delivery_proxy:
+                ctd = (delivery_proxy - order_dt).days
+                ctd_source = "estimated"
+
         if ctd is not None:
             try:
                 ctd_values.append(float(ctd))
+                ctd_sources.append(ctd_source)
             except (ValueError, TypeError):
                 pass
-        
-        # S3 uses boolean true/null for delayed flag, not "Y" string
-        if record.get("SHIPMENT_WAS_DELAYED") is True:
-            delayed_count += 1
-        
+
         # S3 uses BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION (not EXCEPTION_FLAG)
         exc_desc = str(record.get("BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION", "") or "")
         if exc_desc and exc_desc.lower() not in ("no exception", "", "none"):
             exception_count += 1
-        
+
         # Track dates
         for date_field in ["BULK_TRACK_DELIVERY_DTTM", "ACTUAL_SHIP_DATE"]:
             date_val = record.get(date_field)
@@ -65,8 +93,33 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
                 except:
                     pass
     
+    # Delivered classification with fallback:
+    #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
+    #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
+    delivered_count = 0
+    undelivered_count = 0
+    for record in records:
+        if record.get("BULK_TRACK_DELIVERY_DTTM") is not None:
+            delivered_count += 1
+        elif (record.get("SHIPMENT_STATUS") or "").upper() == "DELIVERED" or \
+             (record.get("WIZMO_CURRENT_PKG_STATUS") or "").upper() == "DELIVERED":
+            delivered_count += 1
+        else:
+            undelivered_count += 1
+
     total_shipments = len(records)
     avg_ctd = round(statistics.mean(ctd_values), 2) if ctd_values else 0
+
+    # Compute CTD threshold (mean + 1 std dev) for delay detection
+    if len(ctd_values) > 1:
+        ctd_std = statistics.stdev(ctd_values)
+        ctd_threshold = round(avg_ctd + ctd_std, 2) if ctd_std else avg_ctd
+    else:
+        ctd_threshold = avg_ctd if avg_ctd else 3.0
+
+    # Delayed = CTD > threshold (pure CTD-based detection)
+    delayed_count = sum(1 for v in ctd_values if v > ctd_threshold)
+    estimated_ctd_count = ctd_sources.count("estimated")
     median_ctd = round(statistics.median(ctd_values), 1) if ctd_values else 0
     min_ctd = min(ctd_values) if ctd_values else 0
     max_ctd = max(ctd_values) if ctd_values else 0
@@ -131,11 +184,15 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     
     # Build observations (key findings as bullet points)
     observations = [
-        f"Total shipments in analysis period: {total_shipments}",
-        f"Average CTD: {avg_ctd} days (median: {median_ctd} days)",
-        f"On-time delivery rate: {on_time_rate}%",
+        f"Total shipments in analysis period: {total_shipments} ({delivered_count} delivered, {undelivered_count} undelivered/in-transit)",
+        f"Average CTD: {avg_ctd} days (median: {median_ctd} days), threshold: {ctd_threshold} days",
+        f"On-time delivery rate: {on_time_rate}% (delayed = CTD > {ctd_threshold} days)",
         f"Delayed shipments: {delayed_count} ({delay_rate}%)",
     ]
+    if estimated_ctd_count > 0:
+        observations.append(
+            f"Note: {estimated_ctd_count} shipment(s) used estimated CTD from expected delivery dates"
+        )
     
     if benchmark_avg_ctd:
         observations.append(f"ZIP {postcode} benchmark CTD: {benchmark_avg_ctd} days")
@@ -225,7 +282,11 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             },
             "health_status": health_status,
             "red_flags": red_flags,
-            "delay_definition": "SHIPMENT_WAS_DELAYED=true flag"
+            "delivered_count": delivered_count,
+            "undelivered_count": undelivered_count,
+            "ctd_threshold": ctd_threshold,
+            "estimated_ctd_count": estimated_ctd_count,
+            "delay_definition": f"CTD > {ctd_threshold} days (mean + 1 std dev)"
         },
         "continued_analysis": synthesis,
         "enhanced_next_steps": [

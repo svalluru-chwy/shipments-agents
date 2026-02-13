@@ -21,7 +21,13 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     multi_package = 0
     
     for record in records:
-        weight = record.get("BULK_TRACK_LB_PACKAGE_WEIGHT")
+        # Weight fallback chain:
+        #   BULK_TRACK_LB_PACKAGE_WEIGHT -> SHIPMENT_PLANNED_WEIGHT -> WAREHOUSE_SCALE_WEIGHT
+        weight = (
+            record.get("BULK_TRACK_LB_PACKAGE_WEIGHT")
+            or record.get("SHIPMENT_PLANNED_WEIGHT")
+            or record.get("WAREHOUSE_SCALE_WEIGHT")
+        )
         # S3 field is ORDERS_ORDER_PACKAGE_COUNT, not PACKAGE_COUNT
         pkg_count = record.get("ORDERS_ORDER_PACKAGE_COUNT", 1)
         
