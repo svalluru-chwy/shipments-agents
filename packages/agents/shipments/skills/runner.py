@@ -45,10 +45,9 @@ SHIPMENTS_SKILL_PHASES: List[List[str]] = [
         "shipment_delay_predictor",   # Predict future delays
         "shipment_signal_decoder",    # Root cause analysis (needs signal_generator)
     ],
-    # Phase 3: Depend on delay_predictor, signal_decoder (2 skills)
+    # Phase 3: Deterministic cross-skill risk profile (no LLM)
     [
-        "shipment_intervention",      # Intervention recommendations
-        "shipment_action_prioritizer",  # Priority scoring
+        "customer_risk_profile",      # Cross-references Phase 1+2 results
     ],
     # Phase 4: Consolidation - depends on all above (1 skill)
     [

@@ -1,7 +1,7 @@
 Shipments Agency Platform - Implementation Channel Log
 ======================================================
 Created: 2026-02-12
-Last Updated: 2026-02-13
+Last Updated: 2026-02-15
 
 
 Entry 1: Project Initialization and Architecture (2026-02-12)
@@ -474,3 +474,386 @@ FILES CHANGED:
   packages/agents/shipments/skills/delivery_performance/execute.py
   packages/agents/shipments/skills/carrier_analysis/execute.py
   packages/agents/shipments/skills/exception_analysis/execute.py
+
+================================================================================
+ENTRY 16 - Config Cleanup: Remove Dead o3 Model References
+DATE: 2026-02-13
+================================================================================
+
+WHAT: Replaced all o3-2025-04-16 config defaults with gpt-5-nano-2025-08-07
+      to match actual runtime behavior. Removed stale o3 pricing entry.
+
+WHY: The o3-2025-04-16 model was configured in 3 fields (contacts_model,
+     decoder model, decoder_model) across settings.py and config.yaml, but
+     none of these values were read by any skill execution code. All 6 LLM
+     skills use os.getenv("OPENAI_MODEL", "gpt-5-nano-2025-08-07") directly,
+     so gpt-5-nano was always the actual model running. The config was
+     misleading and needed to reflect reality.
+
+HOW:
+  1. settings.py: Changed 3 defaults from "o3-2025-04-16" to
+     "gpt-5-nano-2025-08-07":
+     - ShipmentSignalsAgentConfig.contacts_model
+     - ShipmentDecoderAgentConfig.model
+     - ShipmentDecoderAgentConfig.decoder_model
+
+  2. config.yaml: Same 3 fields updated to "gpt-5-nano-2025-08-07".
+
+  3. token_tracker.py: Removed the o3-2025-04-16 pricing entry (gpt-5-nano
+     pricing already existed and is the only model in use).
+
+RUNTIME IMPACT: None. These config values are not read by any execution
+code; this is purely a config cleanup.
+
+FILES CHANGED:
+  packages/shared/config/settings.py
+  config.yaml
+  packages/shared/token_tracker.py
+
+
+================================================================================
+ENTRY 17 - Signal Generator Rewrite: Pre-computed Anomalies + Record Trimming
+DATE: 2026-02-15
+================================================================================
+
+WHAT: Rewrote the shipment signal generator with a deterministic Python
+      anomaly pre-filter, shared record trimming utility, and updated
+      output scope (signals/observations + analysis + intervention-needed,
+      no actions or recommendations). Applied record trimming to 3 other
+      skills that send raw records to LLM.
+
+WHY: The signal generator was unreliable -- alternating between 0 and 30
+     signals across runs due to three root causes:
+     1. PROMPT BLOAT: Each record had 274 fields (~12,500 chars JSON).
+        Sending 50 records produced ~102K token prompts, overwhelming
+        the model and causing hallucinated tracking numbers (TRK_001).
+     2. CONFLICTING INSTRUCTIONS: SKILL.md mandated "signal for EVERY
+        order" while the system prompt said "naturally run out of patterns".
+        These directly contradicted, causing non-deterministic behaviour
+        (0 or 30 signals depending on which instruction the LLM followed).
+     3. ORDER_ID MISMATCH: Prompts referenced ORDER_ID (21% populated)
+        instead of ORDERS_ORDER_ID (100% populated), so the LLM couldn't
+        find real order IDs and fabricated them.
+
+HOW:
+  1. Created packages/agents/shipments/skills/record_trimmer.py:
+     - Shared utility with trim_record() and trim_records() functions
+     - Reduces 274 fields to 26 relevant fields (~90% reduction)
+     - ONTIME_DELIVERY_FLAG intentionally excluded (unreliable, Entry 15)
+     - Fields: ORDERS_ORDER_ID, SHIPMENT_TRACKING_NUMBER, CUSTOMER_ID,
+       ORDER_PLACED_DTTM, ACTUAL_SHIP_DATE, BULK_TRACK_DELIVERY_DTTM,
+       BULK_TRACK_ESTIMATED_DELIVERY_DTTM, SHIPMENT_ESTIMATED_DELIVERY_DATE,
+       CLICK_TO_DELIVER_DAYS, SHIP_TO_DELIVER_DAYS, SHIPMENT_WAS_DELAYED,
+       SHIPMENT_STATUS, BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION,
+       WAREHOUSE_CARRIER, FFMCENTER_NAME, ACTUAL_SHIP_ROUTE, POSTCODE,
+       ACTUAL_ZONE, LINEITEM_PRODUCT_NAMES, LINEITEM_PRODUCT_CAT_L1,
+       LINEITEM_PRODUCT_MC2, SHIPMENT_CONTAINS_FRESH,
+       ORDERS_ORDER_AUTO_REORDER_FLAG, BULK_TRACK_LB_PACKAGE_WEIGHT,
+       SHIPMENT_COUNT_OF_ITEMS_IN_BOX, BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION
+
+  2. Rewrote shipment_signal_generator/execute.py:
+     - Added _flag_anomalies() deterministic Python function that splits
+       records into anomalous vs normal based on:
+       * CTD exceeds baseline threshold (ctd_avg + 1 std dev)
+       * SHIPMENT_WAS_DELAYED is truthy
+       * Active/in-transit (no delivery date, status != DELIVERED)
+       * Carrier exception present (excludes "No Exception" false positives)
+       * Fresh/Rx items with elevated CTD
+     - Each flagged record gets a _flags list explaining why it was flagged
+     - Builds compact normal-shipment summary (count, avg CTD, carriers)
+     - Sends only flagged (trimmed) records + normal summary to LLM
+     - If no anomalies detected, returns clean result without LLM call
+     - Updated system prompt: signals/observations + analysis +
+       intervention-needed only. NO actions, NO recommendations
+     - References ORDERS_ORDER_ID (not ORDER_ID) throughout
+
+  3. Rewrote shipment_signal_generator/SKILL.md:
+     - Removed "signal for EVERY order" mandate
+     - New mandate: "one signal per flagged shipment"
+     - Added baseline summary requirement
+     - Removed actions/recommendations from output scope
+     - Added explicit "Do NOT" section for ORDER_ID usage
+     - Updated output format to match new schema
+
+  4. Applied record trimming to 3 other skills:
+     - shipment_signal_decoder/execute.py: trim_records() on 10 sample records
+     - shipment_delay_predictor/execute.py: trim_record() on 1 active shipment
+     - shipment_intervention/execute.py: trim_record() on 1 shipment
+
+RESULT (2 pipeline runs for customer 6180005):
+
+  Run 1 (pre-exception-fix):
+    - 20 records flagged (4 CTD breaches + 16 "No Exception" false positives)
+    - 10 signals in markdown output, all with real IDs
+    - 3 HIGH severity (CTD breaches), 7 LOW (false carrier exceptions)
+    - Duration: 301.2s total (211.2s signals + 90.0s decoder)
+
+  Run 2 (post-exception-fix):
+    - 4 records flagged (all genuine CTD breaches)
+    - 4 signals generated, ALL with real ORDERS_ORDER_IDs:
+      * 5094661531 / 494399793244 - CTD 5, Apoquel dog medication
+      * 5077007697 / 496272761367 - CTD 5, horse supplement
+      * 5062954686 / D10016935065020 - CTD 5, Apoquel dog medication
+      * 5060501565 / 476834403040 - CTD 7, Apoquel dog medication
+    - All 4 signals correctly flagged as intervention_needed=true
+    - Continued analysis paragraph referenced all 4 order IDs with metrics
+    - Normal summary: "26 shipments delivered normally, avg CTD 2.2 days"
+    - Duration: 217.4s total (133.6s signals + 83.8s decoder)
+
+  Comparison with previous runs:
+    - Before rewrite: 0 signals (LLM variance) or 30 signals (noise)
+    - After rewrite: 4 signals deterministically (Python catches anomalies)
+    - Runtime improved: 217s vs 301s (28% faster due to smaller prompts)
+    - Signal quality: all real IDs, all real metrics, no hallucination
+    - Decoder properly decoded all 4 signals with routing analysis
+
+FILES CREATED:
+  packages/agents/shipments/skills/record_trimmer.py
+
+FILES CHANGED:
+  packages/agents/shipments/skills/shipment_signal_generator/execute.py
+  packages/agents/shipments/skills/shipment_signal_generator/SKILL.md
+  packages/agents/shipments/skills/shipment_signal_decoder/execute.py
+  packages/agents/shipments/skills/shipment_delay_predictor/execute.py
+  packages/agents/shipments/skills/shipment_intervention/execute.py
+  docs/channel_log.txt
+
+
+================================================================================
+ENTRY 18 - Fix delay predictor: trust current_order for active shipment detection
+DATE: 2026-02-15
+================================================================================
+
+WHAT: Fixed the delay predictor's _find_active_shipments() function so it
+      trusts the current_order skill's determination instead of falling through
+      to a raw-record filter that disagreed.
+
+WHY: The delay predictor was finding 1 "active" shipment (D10017134276666)
+     while current_order, shipment_health_check, and all other Phase 1 skills
+     agreed all 30 shipments were delivered. The root cause was a fallback
+     chain bug:
+       - Source 2 checked current_order_result.active_order_details
+       - current_order correctly found 0 active, so the list was []
+       - `if details:` evaluated to False on the empty list
+       - This fell through to Source 3 (raw record filter) which used
+         a subtly different delivered-detection logic
+       - Source 3 found D10017134276666 as "active" because its
+         BULK_TRACK_DELIVERY_DTTM was None and BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION
+         was not "DELIVERED", even though SHIPMENT_STATUS was "DELIVERED"
+     The result was a misleading "INDETERMINATE" delay prediction for a
+     shipment that was already delivered per the authoritative source.
+
+HOW:
+  1. Reordered source priority: current_order_result is now Source 1
+     (was Source 2). When it exists (Phase 1 ran), its determination
+     is authoritative -- return its active list even if empty.
+
+  2. Extracted _is_delivered() helper that replicates current_order's
+     exact delivered-detection logic:
+       - BULK_TRACK_DELIVERY_DTTM is not None (primary)
+       - SHIPMENT_STATUS == "DELIVERED" (fallback)
+       - WIZMO_CURRENT_PKG_STATUS == "DELIVERED" (fallback)
+
+  3. Source 3 (standalone fallback) now uses _is_delivered() for
+     consistency with current_order when running without Phase 1.
+
+  4. Legacy cat-agents shipments_result path kept as Source 2 for
+     backwards compatibility.
+
+RESULT (pipeline run for 6180005):
+  - delay_predictor: "No active or in-transit shipments found.
+    All shipments appear to have been delivered." -- matches current_order
+  - No LLM call made (returned clean result instantly)
+  - signal_decoder: 4 signals decoded correctly (unaffected)
+  - Runtime: 171.4s total (98.8s signals + 72.6s decoder)
+    Previous run: 217.4s -- 21% faster (saved ~18s LLM call + ~28s
+    from general variance in check gate/signal generator response times)
+
+FILES CHANGED:
+  packages/agents/shipments/skills/shipment_delay_predictor/execute.py
+  docs/channel_log.txt
+
+
+================================================================================
+ENTRY 19 - Intervention Assessment: Phase 3 synthesis skill
+DATE: 2026-02-15
+================================================================================
+
+WHAT: Rewrote the shipment_intervention skill from an action-recommender
+      into an intervention assessment that synthesises all Phase 1+2 results
+      into a customer-level determination. Wired Phase 3 into the decoder agent.
+
+WHY: The original intervention skill generated specific actions (notification
+     drafts, carrier escalation steps, SLA timelines) which violated the
+     "no actions, no recommendations" requirement. It also only looked at 1
+     shipment from the delay predictor, used hallucinated success rates, and
+     depended on the stale shipments_result key. The pipeline needed a
+     synthesis step that answers: "Is intervention warranted? At what urgency?
+     Why?" -- referencing all upstream results.
+
+HOW:
+  1. Rewrote shipment_intervention/execute.py:
+     - Gathers ALL upstream results: signal_generator (signals), signal_decoder
+       (decoded analysis), delay_predictor, and Phase 1 metrics (health_check,
+       delivery_performance, carrier_analysis, contact_correlation, current_order,
+       check_gate)
+     - Deterministic _compute_assessment() computes:
+       * intervention_warranted (bool)
+       * urgency (critical/high/medium/low/none) based on signal counts:
+         3+ high -> critical, any high -> high, any medium -> medium, etc.
+       * rationale bullets (signal counts, trend direction, contact rate, WISMO)
+       * signal summaries with real IDs
+       * contributing factors from Phase 1 metrics
+     - Lightweight LLM call (_write_synthesis) writes one synthesis paragraph
+       from the deterministic assessment -- focused on intervention context
+     - Falls back to deterministic summary if LLM fails
+     - NO actions, NO recommendations, NO SLA targets, NO communication drafts
+
+  2. Rewrote shipment_intervention/SKILL.md:
+     - Changed from action-recommender to intervention-assessment
+     - Output scope: warranted determination, urgency, rationale, pet care impact
+     - Explicit "Do NOT include actions, recommendations, next steps"
+
+  3. Updated runner.py Phase 3:
+     - Removed shipment_action_prioritizer (generates actions, not wanted)
+     - Phase 3 now contains only shipment_intervention
+
+  4. Updated decoder/agent.py:
+     - Changed phase_filter from [2] to [2, 3]
+     - Phase 2 (delay_predictor + signal_decoder) runs first in parallel
+     - Phase 3 (intervention assessment) runs after, seeing all results
+     - Updated markdown builder to include continued_analysis paragraph
+
+RESULT (pipeline run for 6180005):
+  - Phase 3 ran successfully after Phase 2
+  - Assessment: intervention_warranted=true, urgency=critical
+  - Rationale: "4 of 4 signals flagged as intervention-needed (0 critical,
+    4 high, 0 medium). Delivery performance trend is DECLINING."
+  - Synthesis paragraph referenced all 4 order IDs (5094661531, 5077007697,
+    5062954686, 5060501565), carrier patterns (FedEx FSMS PHX1/PHX2, OnTrac
+    WVAN_TO), CTD metrics, pet care impact (Apoquel Rx medication, horse
+    supplements), contributing factors (avg CTD 2.67, 86.7% on-time,
+    contact rate 20.0, DECLINING trend)
+  - LLM synthesis call took ~19 seconds
+  - Total pipeline: 259.6s (163.8s signals + 95.8s decoder with Phase 2+3)
+
+FILES CHANGED:
+  packages/agents/shipments/skills/shipment_intervention/execute.py
+  packages/agents/shipments/skills/shipment_intervention/SKILL.md
+  packages/agents/shipments/skills/runner.py
+  packages/agents/shipments/decoder/agent.py
+  docs/channel_log.txt
+
+================================================================================
+ENTRY 20 - Replace Phase 3 LLM intervention with recency-aware signals +
+           deterministic customer risk profile
+================================================================================
+DATE: 2026-02-15
+
+WHY:
+  Phase 3 (shipment_intervention) was adding limited value:
+  - Mostly rehashed Phase 1+2 data without new insight
+  - Incorrectly labelled all 4 historical delays as "critical urgency"
+  - Could not distinguish a 72-day-old delivered event from an active one
+  - "Contributing factors" were basic stats, not causal patterns
+  - Required an LLM call (~19s) for a synthesis paragraph
+
+  Meanwhile, the signal generator marked all signals as intervention_needed=true
+  regardless of whether the event was 11 days or 72 days old.
+
+  The actual value lies in two things the pipeline was NOT doing:
+  1. Recency-aware intervention determination (recent vs historical vs active)
+  2. Cross-skill pattern analysis (carrier+route correlation, forward risk)
+
+WHAT WAS IMPLEMENTED:
+
+  Part A - Recency-aware signal generator:
+
+  1. _flag_anomalies now computes _recency and _days_since_event for each
+     flagged record before it goes to the LLM:
+     - "active": not yet delivered (days_since_event = 0)
+     - "recent": delivered within 14 days
+     - "historical": delivered >14 days ago
+     Uses BULK_TRACK_DELIVERY_DTTM (primary) or ORDER_PLACED_DTTM (fallback).
+
+  2. SYSTEM_PROMPT updated: intervention_needed=true only for active/recent
+     events, false for historical (they are pattern context, not actionable).
+     Output schema now includes recency and days_since_event fields.
+
+  3. SKILL.md updated to document recency fields and intervention logic.
+
+  Part B - Deterministic customer risk profile skill:
+
+  New skill: customer_risk_profile (packages/agents/shipments/skills/
+  customer_risk_profile/). Pure Python, zero LLM calls. Reads all Phase 1+2
+  results from state and computes 4 risk dimensions:
+
+  1. Temporal Recency: Classifies signals into active/recent/historical
+     buckets. E.g., "1 of 4 signals is recent, 3 are historical."
+
+  2. Pattern Correlation: Groups signals by carrier + FC route. Finds
+     dominant pattern. Cross-references with carrier delay rates from
+     carrier_analysis_result. E.g., "3 of 4 delays share FedEx FSMS via
+     PHX1/PHX2. Carrier delay rate: 16.7%."
+
+  3. Forward Risk: Estimates future delay exposure from autoship_rate x
+     primary_carrier_share x carrier_delay_rate. Factors in trend direction.
+     E.g., "At 10.6 orders/month, expect ~1.1 delayed orders/month."
+
+  4. Relationship Signal: Combines WISMO rate + contact rate + Rx product
+     detection + active-at-risk count. E.g., "0% WISMO despite 4 delays.
+     Rx medication on record."
+
+  Overall risk level computed from dimensions:
+  - high: active signals, or recent + Rx
+  - elevated: carrier pattern + declining trend
+  - moderate: signals but all historical
+  - low: no signals or improving trend
+
+  Part C - Pipeline wiring:
+
+  1. runner.py: Phase 3 now contains customer_risk_profile instead of
+     shipment_intervention.
+  2. decoder/agent.py: Keeps phase_filter=[2, 3]. Updated description and
+     markdown builder to render risk profile dimensions.
+  3. shipment_intervention/ stays dormant in the repo.
+
+HOW IT WAS IMPLEMENTED:
+  - packages/agents/shipments/skills/shipment_signal_generator/execute.py:
+    Added dateutil import, _parse_datetime helper, RECENCY_WINDOW_DAYS
+    constant. Modified _flag_anomalies to compute _recency and
+    _days_since_event. Updated SYSTEM_PROMPT with recency-aware intervention
+    logic and expanded output schema.
+
+  - packages/agents/shipments/skills/shipment_signal_generator/SKILL.md:
+    Added _recency and _days_since_event to input schema. Updated
+    intervention_needed description and output example.
+
+  - packages/agents/shipments/skills/customer_risk_profile/__init__.py:
+    Empty init.
+
+  - packages/agents/shipments/skills/customer_risk_profile/execute.py:
+    Four dimension functions (_compute_temporal_recency,
+    _compute_pattern_correlation, _compute_forward_risk,
+    _compute_relationship_signal) plus _compute_overall_risk. Main execute()
+    reads state and returns structured output.
+
+  - packages/agents/shipments/skills/customer_risk_profile/SKILL.md:
+    Documents the skill, its inputs, 4 dimensions, and output scope.
+
+  - packages/agents/shipments/skills/runner.py:
+    Phase 3 changed from shipment_intervention to customer_risk_profile.
+
+  - packages/agents/shipments/decoder/agent.py:
+    Updated description and comments. Added _render_risk_profile method
+    for markdown output.
+
+FILES CHANGED:
+  packages/agents/shipments/skills/shipment_signal_generator/execute.py
+  packages/agents/shipments/skills/shipment_signal_generator/SKILL.md
+  packages/agents/shipments/skills/customer_risk_profile/__init__.py (new)
+  packages/agents/shipments/skills/customer_risk_profile/execute.py (new)
+  packages/agents/shipments/skills/customer_risk_profile/SKILL.md (new)
+  packages/agents/shipments/skills/runner.py
+  packages/agents/shipments/decoder/agent.py
+  docs/channel_log.txt

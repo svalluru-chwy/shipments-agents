@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 from openai import OpenAI
 
 from packages.agents.shipments.skills.loader import load_skill_reference, load_shared_context, load_skill
+from packages.agents.shipments.skills.record_trimmer import trim_record
 
 
 def _build_prompt(
@@ -37,7 +38,9 @@ def _build_prompt(
     Returns:
         Formatted prompt string
     """
-    shipment_json = json.dumps(shipment, indent=2, default=str)
+    # Trim to relevant fields before sending to LLM
+    trimmed_shipment = trim_record(shipment) if shipment else shipment
+    shipment_json = json.dumps(trimmed_shipment, indent=2, default=str)
     tracking_json = json.dumps(tracking_events, indent=2, default=str)
     
     return f"""{context}
@@ -80,20 +83,45 @@ Output ONLY valid JSON. No markdown, no code blocks, no additional text.
 """
 
 
+def _is_delivered(record: Dict[str, Any]) -> bool:
+    """
+    Determine if a shipment record is delivered.
+
+    Uses the same logic as the current_order skill for consistency:
+      1. BULK_TRACK_DELIVERY_DTTM is not None  (primary)
+      2. SHIPMENT_STATUS == "DELIVERED"         (fallback)
+      3. WIZMO_CURRENT_PKG_STATUS == "DELIVERED" (fallback)
+    """
+    if record.get("BULK_TRACK_DELIVERY_DTTM") is not None:
+        return True
+    shipment_status = (record.get("SHIPMENT_STATUS") or "").upper()
+    wizmo_status = (record.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
+    return shipment_status == "DELIVERED" or wizmo_status == "DELIVERED"
+
+
 def _find_active_shipments(state: Dict[str, Any], target_result_key: str) -> list:
     """
-    Locate active (undelivered / in-transit) shipments from the best available
-    source in state.
+    Locate active (undelivered / in-transit) shipments.
 
     Lookup order:
-      1. state[target_result_key].active_shipments  (original cat-agents path)
-      2. state["current_order_result"]["grounded_metrics"]["active_order_details"]
-         (Phase 1 result injected by the runner between phases)
-      3. state["shipment_data"]["records"] filtered for undelivered records
+      1. state["current_order_result"] from Phase 1 -- authoritative source.
+         If current_order ran, trust its determination (even if 0 active).
+      2. state[target_result_key].active_shipments  (legacy cat-agents path)
+      3. Standalone fallback: filter raw records using the same delivered-
+         detection logic as the current_order skill.
 
     Returns a list of dicts, each representing one active shipment.
     """
-    # --- Source 1: original shipments_result key ---
+    # --- Source 1: Phase 1 current_order skill result (authoritative) ---
+    # If current_order ran in Phase 1, its result is the source of truth.
+    # Return its active list even if empty (0 active = all delivered).
+    current_order = state.get("current_order_result")
+    if isinstance(current_order, dict) and "grounded_metrics" in current_order:
+        metrics = current_order["grounded_metrics"]
+        # active_order_details is always present when current_order ran
+        return list(metrics.get("active_order_details") or [])
+
+    # --- Source 2: legacy shipments_result key (cat-agents compat) ---
     shipments_result = state.get(target_result_key)
     if shipments_result:
         if hasattr(shipments_result, "active_shipments") and shipments_result.active_shipments:
@@ -101,40 +129,22 @@ def _find_active_shipments(state: Dict[str, Any], target_result_key: str) -> lis
         if isinstance(shipments_result, dict) and shipments_result.get("active_shipments"):
             return list(shipments_result["active_shipments"])
 
-    # --- Source 2: Phase 1 current_order skill result ---
-    current_order = state.get("current_order_result")
-    if isinstance(current_order, dict):
-        metrics = current_order.get("grounded_metrics", {})
-        details = metrics.get("active_order_details") or []
-        if details:
-            return list(details)
-
-    # --- Source 3: raw shipment records, filtered for in-transit ---
+    # --- Source 3: standalone fallback -- filter raw records ---
+    # Uses the same _is_delivered logic as current_order for consistency.
     shipment_data = state.get("shipment_data", {})
     records = shipment_data.get("records", [])
     active = []
     for r in records:
-        # Delivered check with fallback chain:
-        #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
-        #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
-        delivery_date = r.get("BULK_TRACK_DELIVERY_DTTM")
-        is_delivered = delivery_date is not None
-        if not is_delivered:
-            shipment_status = (r.get("SHIPMENT_STATUS") or "").upper()
-            wizmo_status = (r.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
-            if shipment_status == "DELIVERED" or wizmo_status == "DELIVERED":
-                is_delivered = True
-
-        # Status fallback chain for filtering
-        status = (
-            r.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
-            or r.get("SHIPMENT_STATUS")
-            or r.get("WIZMO_CURRENT_PKG_STATUS")
-            or ""
-        ).upper()
-
-        if not is_delivered and status not in ("DELIVERED", "COMPLETE"):
-            active.append(r)
+        if not _is_delivered(r):
+            # Additional status check (same as current_order main loop)
+            status = (
+                r.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
+                or r.get("SHIPMENT_STATUS")
+                or r.get("WIZMO_CURRENT_PKG_STATUS")
+                or ""
+            ).upper()
+            if status not in ("DELIVERED", "COMPLETE"):
+                active.append(r)
     return active
 
 

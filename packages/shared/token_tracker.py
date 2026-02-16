@@ -93,7 +93,6 @@ class TokenTracker:
             "gpt-4.1-2025-04-14": {"prompt": 0.03, "completion": 0.06},
             "gpt-4o": {"prompt": 0.005, "completion": 0.015},
             "gpt-5-nano-2025-08-07": {"prompt": 0.002, "completion": 0.008},
-            "o3-2025-04-16": {"prompt": 0.10, "completion": 0.30},
             "gpt-3.5-turbo": {"prompt": 0.001, "completion": 0.002},
         }
 

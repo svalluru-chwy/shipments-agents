@@ -41,7 +41,7 @@ class ShipmentDecoderAgent(BaseAgent):
         return AgentManifest(
             name="Shipment Decoder Agent",
             version="1.0.0",
-            description="Runs Phase 2 skills: delay prediction and signal decoding",
+            description="Runs Phase 2 skills (delay prediction, signal decoding) + Phase 3 (customer risk profile)",
             agent_name=self.agent_name,
             s3_sources=[
                 S3Source(folder="shipment_agency_revised/signals", description="Signals output from upstream agent"),
@@ -77,10 +77,19 @@ class ShipmentDecoderAgent(BaseAgent):
             signals_data = self.s3.download_json(key)
             skill_results = signals_data.get("skill_results", {})
 
-        # Load shipment inspector for Phase 2 skills that need shipment records
-        shipment_inspector = self.load_customer_json(customer_id, "shipment_inspector_query")
-        main_shipment = self.load_customer_json(customer_id, "main_shipment_query")
-        records = _extract_records(shipment_inspector) or _extract_records(main_shipment)
+        # Use upstream shipment_data if available (has ORDERS_ORDER_ID,
+        # WAREHOUSE_CARRIER).  Fall back to S3 inspector/main_shipment.
+        upstream_shipment = (
+            signals_data.get("shipment_data") if request.upstream_data else None
+        )
+        if upstream_shipment and _extract_records(upstream_shipment):
+            records = _extract_records(upstream_shipment)
+            self.logger.info(f"Using upstream shipment_data ({len(records)} records)")
+        else:
+            shipment_inspector = self.load_customer_json(customer_id, "shipment_inspector_query")
+            main_shipment = self.load_customer_json(customer_id, "main_shipment_query")
+            records = _extract_records(shipment_inspector) or _extract_records(main_shipment)
+            self.logger.info(f"Loaded shipment records from S3 ({len(records)} records)")
 
         state: Dict[str, Any] = {
             "customer_id": customer_id,
@@ -94,9 +103,11 @@ class ShipmentDecoderAgent(BaseAgent):
         for k, v in skill_results.items():
             state[k] = v
 
-        # 2. Run Phase 2 skills
-        self.logger.info("Running Phase 2 skills")
-        result = run_skills_phased(state, phase_filter=[2])
+        # 2. Run Phase 2 + Phase 3 skills
+        #    Phase 2: delay_predictor, signal_decoder (parallel)
+        #    Phase 3: deterministic customer risk profile (no LLM)
+        self.logger.info("Running Phase 2 + Phase 3 skills")
+        result = run_skills_phased(state, phase_filter=[2, 3])
         decoded_results = result.get("skill_results", {})
         errors = result.get("errors", [])
 
@@ -146,13 +157,20 @@ class ShipmentDecoderAgent(BaseAgent):
         }
 
     def _build_decoded_markdown(self, decoded_results: Dict[str, Any]) -> str:
-        """Build markdown summary from Phase 2 skill results."""
-        sections = ["# Decoded Shipment Signals (Phase 2)", ""]
+        """Build markdown summary from Phase 2 + Phase 3 skill results."""
+        sections = ["# Decoded Shipment Signals (Phase 2 + 3)", ""]
         for key, value in decoded_results.items():
             if not value or value.get("error"):
                 continue
             skill_name = value.get("skill", key)
             sections.append(f"## {skill_name}")
+
+            # Special rendering for customer_risk_profile
+            if skill_name == "customer_risk_profile":
+                self._render_risk_profile(sections, value)
+                sections.append("")
+                continue
+
             if "summary" in value:
                 sections.append(str(value["summary"]))
             if "observations" in value:
@@ -164,5 +182,22 @@ class ShipmentDecoderAgent(BaseAgent):
             if "root_causes" in value:
                 for rc in value["root_causes"][:10]:
                     sections.append(f"- {rc}")
+            if "continued_analysis" in value:
+                sections.append(f"\n{value['continued_analysis']}")
             sections.append("")
         return "\n".join(sections) if sections else "# No decoded results"
+
+    @staticmethod
+    def _render_risk_profile(sections: list, value: Dict[str, Any]) -> None:
+        """Render the customer_risk_profile result as markdown."""
+        overall = value.get("overall_risk_level", "unknown")
+        sections.append(f"**Overall Risk Level: {overall.upper()}**")
+        sections.append("")
+
+        dims = value.get("risk_dimensions", {})
+        for dim_name, dim_data in dims.items():
+            label = dim_name.replace("_", " ").title()
+            finding = dim_data.get("finding", "")
+            sections.append(f"### {label}")
+            sections.append(f"- {finding}")
+            sections.append("")

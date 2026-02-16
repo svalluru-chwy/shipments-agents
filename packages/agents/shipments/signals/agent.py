@@ -344,17 +344,17 @@ class ShipmentSignalsAgent(BaseAgent):
             model = self.settings.agents.shipment_signals.check_gate_model
             self.logger.info(f"Calling check gate LLM ({model})...")
 
-            response = self.openai_client.chat.completions.create(
+            response = self.openai_client.responses.create(
                 model=model,
-                messages=[
+                reasoning={"effort": "medium"},
+                input=[
                     {"role": "system", "content": CHECK_GATE_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                response_format={"type": "json_object"},
-                timeout=120,
+                text={"format": {"type": "json_object"}},
             )
 
-            content = response.choices[0].message.content or "{}"
+            content = response.output_text or "{}"
             result = json.loads(content)
 
             is_red = result.get("is_red", False)

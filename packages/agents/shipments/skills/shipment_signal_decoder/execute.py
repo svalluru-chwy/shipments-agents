@@ -12,6 +12,7 @@ from typing import Dict, Any, List
 from openai import OpenAI
 
 from packages.agents.shipments.skills.loader import load_skill_instructions, load_reference_docs
+from packages.agents.shipments.skills.record_trimmer import trim_records
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano-2025-08-07")
 
@@ -61,14 +62,15 @@ Total Signals: {len(signals)}
 ```
 """
     
-    # Build raw data section (sample for context)
+    # Build raw data section (sample for context, trimmed to relevant fields)
     sample_records = shipment_records[:10] if shipment_records else []
+    trimmed_samples = trim_records(sample_records)
     data_section = f"""
-## RAW SHIPMENT DATA (Sample)
+## SHIPMENT DATA (Sample, trimmed to relevant fields)
 Available for evidence gathering:
 
 ```json
-{json.dumps(sample_records, indent=2, default=str)}
+{json.dumps(trimmed_samples, indent=2, default=str)}
 ```
 """
     

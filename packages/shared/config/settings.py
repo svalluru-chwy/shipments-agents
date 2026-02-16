@@ -47,27 +47,27 @@ class PipelineConfig(BaseModel):
 
 class OpenAIConfig(BaseModel):
     default_model: str = "gpt-5-nano-2025-08-07"
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "medium"
     timeout: int = 600
 
 
 class ShipmentSignalsAgentConfig(BaseModel):
     model: str = "gpt-5-nano-2025-08-07"
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "medium"
     timeout: int = 600
     check_gate_model: str = "gpt-5-nano-2025-08-07"
-    signal_generator_model: str = "gpt-4.1-2025-04-14"
-    contacts_model: str = "o3-2025-04-16"
+    signal_generator_model: str = "gpt-5-nano-2025-08-07"
+    contacts_model: str = "gpt-5-nano-2025-08-07"
     validation_threshold: float = 0.95
     max_retries: int = 2
 
 
 class ShipmentDecoderAgentConfig(BaseModel):
-    model: str = "o3-2025-04-16"
-    reasoning_effort: str = "high"
+    model: str = "gpt-5-nano-2025-08-07"
+    reasoning_effort: str = "medium"
     timeout: int = 600
     densification_model: str = "gpt-5-nano-2025-08-07"
-    decoder_model: str = "o3-2025-04-16"
+    decoder_model: str = "gpt-5-nano-2025-08-07"
     delay_predictor_model: str = "gpt-5-nano-2025-08-07"
     validation_threshold: float = 0.90
     max_retries: int = 2
@@ -75,7 +75,7 @@ class ShipmentDecoderAgentConfig(BaseModel):
 
 class ShipmentActionsAgentConfig(BaseModel):
     model: str = "gpt-5-nano-2025-08-07"
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "medium"
     timeout: int = 600
     planner_model: str = "gpt-5-nano-2025-08-07"
     prioritizer_model: str = "gpt-5-nano-2025-08-07"
