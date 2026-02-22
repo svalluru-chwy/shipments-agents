@@ -2,24 +2,20 @@
 Order Behavior Skill - Analyzes order frequency and category patterns.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
 from collections import Counter
 
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
 
-def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
-    """Execute the order behavior skill."""
-    shipment_data = state.get("shipment_data", {})
-    records = shipment_data.get("records", [])
-    
-    if not records:
-        return {"skill": "order_behavior", "error": "No shipment data", "grounded_metrics": {"total_shipments": 0}}
-    
-    # Analyze order patterns
+
+def _compute_baseline_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute baseline order behavior metrics (deterministic)."""
     order_ids = set()
     autoship_orders = 0
     categories = []
     order_dates = []
+    total = len(records)
     
     for record in records:
         # Use ORDERS_ORDER_ID (not ORDER_ID which is often null)
@@ -71,32 +67,60 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     category_counts = Counter(categories)
     primary_category = category_counts.most_common(1)[0][0] if category_counts else None
     
+    return {
+        "total_shipments": total,
+        "unique_orders": unique_orders,
+        "autoship_orders": autoship_orders,
+        "autoship_rate": autoship_rate,
+        "order_frequency": order_frequency,
+        "primary_category": primary_category,
+        "category_distribution": dict(category_counts.most_common(5))
+    }
+
+
+def _deterministic_fallback(records: List[Dict[str, Any]], baseline: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic fallback if LLM fails."""
+    metrics = _compute_baseline_metrics(records)
+    
     observations = [
-        f"Total unique orders: {unique_orders}",
-        f"Autoship rate: {autoship_rate}%",
-        f"Order frequency: {order_frequency} orders/month",
-        f"Primary category: {primary_category or 'Not specified'}"
+        f"Total unique orders: {metrics['unique_orders']}",
+        f"Autoship rate: {metrics['autoship_rate']}%",
+        f"Order frequency: {metrics['order_frequency']} orders/month"
     ]
     
-    result = {
+    return {
         "skill": "order_behavior",
         "observations": observations,
         "summary": {
-            "autoship_rate": autoship_rate,
-            "order_frequency": order_frequency,
-            "primary_category": primary_category
+            "autoship_rate": metrics["autoship_rate"],
+            "order_frequency": metrics["order_frequency"],
+            "primary_category": metrics["primary_category"]
         },
-        "continued_analysis": f"Order behavior shows {order_frequency} orders/month with {autoship_rate}% autoship rate.",
-        "enhanced_next_steps": "Consider autoship promotion for repeat purchases." if autoship_rate < 50 else "Healthy autoship adoption.",
-        "grounded_metrics": {
-            "total_shipments": len(records),
-            "unique_orders": unique_orders,
-            "autoship_orders": autoship_orders,
-            "autoship_rate": autoship_rate,
-            "order_frequency": order_frequency,
-            "primary_category": primary_category,
-            "category_distribution": dict(category_counts.most_common(5))
-        }
+        "continued_analysis": f"Order behavior (deterministic fallback): {metrics['order_frequency']} orders/month.",
+        "enhanced_next_steps": "Monitor order patterns.",
+        "grounded_metrics": metrics
     }
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """Execute the order behavior skill with LLM analysis."""
+    shipment_data = state.get("shipment_data", {})
+    records = shipment_data.get("records", [])
+    
+    if not records:
+        return {"skill": "order_behavior", "error": "No shipment data", "grounded_metrics": {"total_shipments": 0}}
+    
+    baseline_metrics = _compute_baseline_metrics(records)
+    context = {"customer_id": state.get("customer_id", "unknown")}
+    
+    executor = LLMSkillExecutor(skill_name="order_behavior", reasoning_effort="low")
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50
+    )
     
     return result
+

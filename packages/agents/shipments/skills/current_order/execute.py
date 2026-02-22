@@ -1,17 +1,102 @@
 """
 Current Order Skill - Tracks active/in-progress orders and predicts delays.
+NOTE: Simplified LLM-powered version. Active order tracking logic moved to baseline computation.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime, timedelta
+
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
+
+
+def _compute_baseline_metrics(records: List[Dict[str, Any]], contact_records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute baseline current order metrics (deterministic)."""
+    active_orders = []
+    at_risk = []
+    now = datetime.now()
+    total = len(records)
+    
+    for record in records:
+        status = (
+            record.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
+            or record.get("SHIPMENT_STATUS")
+            or record.get("WIZMO_CURRENT_PKG_STATUS")
+            or ""
+        ).upper()
+        
+        delivered_dt = record.get("BULK_TRACK_DELIVERY_DTTM")
+        is_delivered = delivered_dt is not None or "DELIVERED" in status
+        
+        if not is_delivered:
+            active_orders.append({
+                "order_id": record.get("ORDER_ID"),
+                "tracking": record.get("SHIPMENT_TRACKING_NUMBER"),
+                "status": status,
+                "ctd": record.get("CLICK_TO_DELIVER_DAYS")
+            })
+            
+            # At-risk if CTD > 3 and still in transit
+            ctd = record.get("CLICK_TO_DELIVER_DAYS")
+            if ctd and float(ctd) > 3:
+                at_risk.append(active_orders[-1])
+    
+    # VOC context
+    cutoff_date = now - timedelta(days=90)
+    shipment_contacts_90d = 0
+    for contact in contact_records:
+        contact_date_str = contact.get("SESSION_START_DTTM")
+        contact_reason = " ".join(filter(None, [
+            str(contact.get("CATEGORY_LEVEL_1", "") or ""),
+            str(contact.get("CATEGORY_LEVEL_2", "") or "")
+        ])).lower()
+        
+        if any(kw in contact_reason for kw in ["ship", "deliver", "track", "delay"]):
+            if contact_date_str:
+                try:
+                    contact_dt = datetime.fromisoformat(str(contact_date_str).replace("Z", "+00:00"))
+                    if contact_dt.replace(tzinfo=None) >= cutoff_date:
+                        shipment_contacts_90d += 1
+                except:
+                    pass
+    
+    return {
+        "total_orders": total,
+        "active_orders": len(active_orders),
+        "at_risk_orders": len(at_risk),
+        "voc_context": {"shipment_contacts_last_90_days": shipment_contacts_90d},
+        "active_order_details": active_orders[:5],
+        "at_risk_details": at_risk[:3]
+    }
+
+
+def _deterministic_fallback(records: List[Dict[str, Any]], baseline: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic fallback if LLM fails."""
+    contact_records = context.get("contact_records", [])
+    metrics = _compute_baseline_metrics(records, contact_records)
+    
+    observations = [
+        f"Active orders: {metrics['active_orders']}",
+        f"At-risk orders: {metrics['at_risk_orders']}"
+    ]
+    
+    return {
+        "skill": "current_order",
+        "observations": observations,
+        "summary": {
+            "active_orders": metrics["active_orders"],
+            "at_risk_orders": metrics["at_risk_orders"]
+        },
+        "continued_analysis": f"Current order analysis (deterministic fallback): {metrics['active_orders']} active.",
+        "enhanced_next_steps": "Monitor active orders.",
+        "grounded_metrics": metrics
+    }
 
 
 def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
-    """Execute the current order skill."""
+    """Execute the current order skill with LLM analysis."""
     shipment_data = state.get("shipment_data", {})
     records = shipment_data.get("records", [])
     
-    # Load customer contacts to check for duplicate outreach
     customer_contacts = state.get("customer_contacts", {})
     contact_records = []
     if isinstance(customer_contacts, dict):
@@ -20,22 +105,18 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         contact_records = customer_contacts
     
     if not records:
-        # Even with no shipment data, provide VOC context
         now = datetime.now()
         cutoff_date = now - timedelta(days=90)
         shipment_contacts_90d = 0
         
         for contact in contact_records:
-            # S3 uses SESSION_START_DTTM (not CONTACT_DATE)
             contact_date_str = contact.get("SESSION_START_DTTM")
-            # S3 uses CATEGORY_LEVEL_1/2/3 (not CONTACT_REASON)
             contact_reason = " ".join(filter(None, [
                 str(contact.get("CATEGORY_LEVEL_1", "") or ""),
-                str(contact.get("CATEGORY_LEVEL_2", "") or ""),
-                str(contact.get("CATEGORY_LEVEL_3", "") or ""),
+                str(contact.get("CATEGORY_LEVEL_2", "") or "")
             ])).lower()
             
-            if any(keyword in contact_reason for keyword in ["ship", "deliver", "track", "delay", "transit", "package"]):
+            if any(kw in contact_reason for kw in ["ship", "deliver", "track", "delay"]):
                 if contact_date_str:
                     try:
                         contact_dt = datetime.fromisoformat(str(contact_date_str).replace("Z", "+00:00"))
@@ -53,183 +134,20 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             ],
             "grounded_metrics": {
                 "total_orders": 0,
-                "voc_context": {
-                    "shipment_contacts_last_90_days": shipment_contacts_90d
-                }
+                "voc_context": {"shipment_contacts_last_90_days": shipment_contacts_90d}
             }
         }
     
-    # Find active orders (not yet delivered)
-    active_orders = []
-    at_risk = []
+    baseline_metrics = _compute_baseline_metrics(records, contact_records)
+    context = {"customer_id": state.get("customer_id", "unknown"), "contact_records": contact_records}
     
-    now = datetime.now()
-    
-    for record in records:
-        # Status with fallback chain:
-        #   BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION -> SHIPMENT_STATUS -> WIZMO_CURRENT_PKG_STATUS
-        status = (
-            record.get("BULK_TRACK_LAST_STATUS_CODE_DESCRIPTION")
-            or record.get("SHIPMENT_STATUS")
-            or record.get("WIZMO_CURRENT_PKG_STATUS")
-            or ""
-        ).upper()
-
-        # Delivered check with fallback:
-        #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
-        #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
-        delivery_date = record.get("BULK_TRACK_DELIVERY_DTTM")
-        is_delivered = delivery_date is not None
-        if not is_delivered:
-            shipment_status = (record.get("SHIPMENT_STATUS") or "").upper()
-            wizmo_status = (record.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
-            if shipment_status == "DELIVERED" or wizmo_status == "DELIVERED":
-                is_delivered = True
-
-        ship_date = record.get("ACTUAL_SHIP_DATE")
-
-        # Expected delivery with fallback chain:
-        #   EXPECTED_DELIVERY_DATE -> SHIPMENT_ESTIMATED_DELIVERY_DATE
-        #   -> WIZMO_CURRENT_ARRIVAL_DATE -> LAST_EXPECTED_DELIVERY_DATE
-        expected_delivery = (
-            record.get("EXPECTED_DELIVERY_DATE")
-            or record.get("SHIPMENT_ESTIMATED_DELIVERY_DATE")
-            or record.get("WIZMO_CURRENT_ARRIVAL_DATE")
-            or record.get("LAST_EXPECTED_DELIVERY_DATE")
-        )
-        
-        # Only classify as active if not delivered AND status is not a delivered variant
-        if not is_delivered and status not in ["DELIVERED", "COMPLETE"]:
-            order = {
-                "order_id": record.get("ORDER_ID") or record.get("ORDERS_ORDER_ID"),
-                "tracking": record.get("SHIPMENT_TRACKING_NUMBER"),
-                "carrier": record.get("WAREHOUSE_CARRIER"),
-                "status": status,
-                "ship_date": ship_date,
-                "expected_delivery": expected_delivery
-            }
-            active_orders.append(order)
-            
-            # Check if at risk (>5 days in transit)
-            if ship_date:
-                try:
-                    if isinstance(ship_date, str):
-                        ship_dt = datetime.fromisoformat(ship_date.replace("Z", "+00:00"))
-                    else:
-                        ship_dt = ship_date
-                    
-                    days_in_transit = (now - ship_dt.replace(tzinfo=None)).days
-                    if days_in_transit > 5:
-                        order["days_in_transit"] = days_in_transit
-                        order["risk_level"] = "HIGH" if days_in_transit > 7 else "MEDIUM"
-                        at_risk.append(order)
-                except:
-                    pass
-    
-    total_active = len(active_orders)
-    total_at_risk = len(at_risk)
-    
-    # Check if customer has contacted us about shipment issues recently (last 90 days)
-    shipment_contacts_90d = 0
-    recent_shipment_contacts = []
-    if contact_records:
-        cutoff_date = now - timedelta(days=90)
-        for contact in contact_records:
-            # S3 uses SESSION_START_DTTM (not CONTACT_DATE)
-            contact_date_str = contact.get("SESSION_START_DTTM")
-            # S3 uses CATEGORY_LEVEL_1/2/3 (not CONTACT_REASON)
-            contact_reason = " ".join(filter(None, [
-                str(contact.get("CATEGORY_LEVEL_1", "") or ""),
-                str(contact.get("CATEGORY_LEVEL_2", "") or ""),
-                str(contact.get("CATEGORY_LEVEL_3", "") or ""),
-            ])).lower()
-            contact_reason_display = " > ".join(filter(None, [
-                str(contact.get("CATEGORY_LEVEL_1", "") or ""),
-                str(contact.get("CATEGORY_LEVEL_2", "") or ""),
-            ]))
-            
-            # Check if shipment/delivery related
-            if any(keyword in contact_reason for keyword in ["ship", "deliver", "track", "delay", "transit", "package"]):
-                if contact_date_str:
-                    try:
-                        if isinstance(contact_date_str, str):
-                            contact_dt = datetime.fromisoformat(contact_date_str.replace("Z", "+00:00"))
-                        else:
-                            contact_dt = contact_date_str
-                        
-                        if contact_dt.replace(tzinfo=None) >= cutoff_date:
-                            shipment_contacts_90d += 1
-                            recent_shipment_contacts.append({
-                                "date": contact_date_str,
-                                "reason": contact_reason_display or "Unknown"
-                            })
-                    except:
-                        pass
-    
-    observations = [
-        f"Analyzed {len(records)} total shipments for active/in-transit orders",
-        f"Total active orders: {total_active}",
-        f"Orders at risk (HIGH/CRITICAL): {total_at_risk}"
-    ]
-    
-    # Add delivery status context (with fallback to SHIPMENT_STATUS/WIZMO)
-    def _is_delivered(r: Dict[str, Any]) -> bool:
-        if r.get("BULK_TRACK_DELIVERY_DTTM") is not None:
-            return True
-        s = (r.get("SHIPMENT_STATUS") or "").upper()
-        w = (r.get("WIZMO_CURRENT_PKG_STATUS") or "").upper()
-        return s == "DELIVERED" or w == "DELIVERED"
-
-    delivered_count = len([r for r in records if _is_delivered(r)])
-    if delivered_count == len(records):
-        observations.append(f"All {delivered_count} shipments have been delivered")
-    
-    # Add VOC context with detail
-    total_contacts = len(contact_records)
-    observations.append(f"Checked {total_contacts} customer contacts for shipment-related issues")
-    
-    if shipment_contacts_90d > 0:
-        observations.append(f"Found {shipment_contacts_90d} shipment-related contact(s) in last 90 days")
-        # Add details of recent contacts
-        for contact in recent_shipment_contacts[:2]:
-            observations.append(f"  • Contact on {contact['date'][:10]}: {contact['reason'][:60]}")
-    else:
-        observations.append("No shipment-related contacts found in last 90 days")
-    
-    for order in at_risk[:3]:
-        observations.append(
-            f"At-risk order: {order['order_id']}, {order.get('days_in_transit', 'N/A')} days in transit, status: {order['status']}"
-        )
-    
-    result = {
-        "skill": "current_order",
-        "observations": observations,
-        "order_summary": {
-            "active_orders": total_active,
-            "at_risk_orders": total_at_risk
-        },
-        "risk_assessment": {
-            "high_risk_count": len([o for o in at_risk if o.get("risk_level") == "HIGH"]),
-            "medium_risk_count": len([o for o in at_risk if o.get("risk_level") == "MEDIUM"])
-        },
-        "continued_analysis": f"Current order tracking shows {total_active} active orders with {total_at_risk} at risk.",
-        "enhanced_next_steps": (
-            f"Proactive outreach recommended for at-risk orders. Note: Customer {'has' if shipment_contacts_90d > 0 else 'has not'} contacted about delivery issues recently."
-            if at_risk else "No orders at risk."
-        ),
-        "grounded_metrics": {
-            "total_shipments_analyzed": len(records),
-            "delivered_shipments": delivered_count,
-            "total_active_orders": total_active,
-            "at_risk_orders": total_at_risk,
-            "active_order_details": active_orders[:10],
-            "at_risk_details": at_risk,
-            "voc_context": {
-                "total_contacts_checked": len(contact_records),
-                "shipment_contacts_last_90_days": shipment_contacts_90d,
-                "recent_contacts": recent_shipment_contacts[:3]
-            }
-        }
-    }
+    executor = LLMSkillExecutor(skill_name="current_order", reasoning_effort="medium")
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50
+    )
     
     return result

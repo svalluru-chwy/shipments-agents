@@ -2,24 +2,15 @@
 Routing Efficiency Skill - Analyzes arc distance and FC distance optimization.
 """
 
-import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 import statistics
 
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
 
-def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
-    """Execute the routing efficiency skill."""
-    # Use shipment_inspector data which has ARC_DISTANCE and BEST_FC_ARC_DISTANCE
-    shipment_inspector = state.get("shipment_inspector", {})
-    records = shipment_inspector.get("data", []) if isinstance(shipment_inspector, dict) else []
-    
-    # Fallback to shipment_data if inspector not available
-    if not records:
-        shipment_data = state.get("shipment_data", {})
-        records = shipment_data.get("records", [])
-    
-    if not records:
-        return {"skill": "routing_efficiency", "error": "No shipment data", "grounded_metrics": {"total_shipments": 0}}
+
+def _compute_baseline_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute baseline routing metrics (deterministic)."""
+    total = len(records)
     
     # Analyze routing metrics
     arc_distances = []
@@ -76,51 +67,61 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     # Primary FC
     primary_fc = max(fc_distances.items(), key=lambda x: len(x[1]))[0] if fc_distances else "Unknown"
     
-    # Build observations
-    observations = []
+    return {
+        "total_shipments": total,
+        "avg_arc_distance": avg_arc,
+        "avg_optimal_distance": avg_best_fc,
+        "routing_efficiency_pct": routing_efficiency_pct,
+        "avg_excess_miles": avg_excess_miles,
+        "primary_fc": primary_fc,
+        "routing_status": routing_status,
+        "arc_range_distribution": arc_ranges
+    }
+
+
+def _deterministic_fallback(records: List[Dict[str, Any]], baseline: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic fallback if LLM fails."""
+    metrics = _compute_baseline_metrics(records)
     
-    if routing_efficiency_pct == 0:
-        observations.append("No arc distance data available for routing analysis")
-        observations.append(f"Analyzed {total} shipments")
-        observations.append(f"Primary FC: {primary_fc}")
-    else:
-        observations.append(f"Analyzed {total} shipments for routing efficiency")
-        observations.append(f"Average arc distance: {avg_arc} miles")
-        observations.append(f"Optimal FC arc distance: {avg_best_fc} miles")
-        observations.append(f"Routing efficiency: {routing_efficiency_pct}%")
-        observations.append(f"Average excess miles: {avg_excess_miles}")
-        observations.append(f"Primary FC: {primary_fc}")
-        observations.append(f"Routing status: {routing_status}")
-        
-        # Add arc range distribution
-        if arc_ranges:
-            for arc_range, count in sorted(arc_ranges.items(), key=lambda x: -x[1]):
-                pct = round((count / total) * 100, 1)
-                observations.append(f"{pct}% of shipments in {arc_range} mile range")
+    observations = [f"Analyzed {metrics['total_shipments']} shipments for routing efficiency"]
+    if metrics["routing_efficiency_pct"] > 0:
+        observations.append(f"Routing efficiency: {metrics['routing_efficiency_pct']}%")
     
-    result = {
+    return {
         "skill": "routing_efficiency",
         "observations": observations,
         "summary": {
-            "routing_efficiency_pct": routing_efficiency_pct,
-            "avg_arc_distance": avg_arc,
-            "avg_optimal_distance": avg_best_fc,
-            "avg_excess_miles": avg_excess_miles,
-            "primary_fc": primary_fc,
-            "routing_status": routing_status
+            "routing_efficiency_pct": metrics["routing_efficiency_pct"],
+            "routing_status": metrics["routing_status"]
         },
-        "continued_analysis": f"Routing efficiency is {routing_status.lower().replace('_', ' ')} at {routing_efficiency_pct}% with {avg_excess_miles} excess miles on average." if routing_efficiency_pct > 0 else "No arc distance data available for routing analysis.",
-        "enhanced_next_steps": "Consider FC optimization to reduce excess miles." if routing_status == "SUBOPTIMAL" else ("Routing data not available." if routing_status == "NO_DATA" else "Routing is efficient."),
-        "grounded_metrics": {
-            "total_shipments": total,
-            "avg_arc_distance": avg_arc,
-            "avg_optimal_distance": avg_best_fc,
-            "routing_efficiency_pct": routing_efficiency_pct,
-            "avg_excess_miles": avg_excess_miles,
-            "primary_fc": primary_fc,
-            "routing_status": routing_status,
-            "arc_range_distribution": arc_ranges
-        }
+        "continued_analysis": f"Routing analysis (deterministic fallback): {metrics['routing_status'].lower()}.",
+        "enhanced_next_steps": "Monitor routing efficiency.",
+        "grounded_metrics": metrics
     }
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """Execute the routing efficiency skill with LLM analysis."""
+    shipment_inspector = state.get("shipment_inspector", {})
+    records = shipment_inspector.get("data", []) if isinstance(shipment_inspector, dict) else []
+    
+    if not records:
+        shipment_data = state.get("shipment_data", {})
+        records = shipment_data.get("records", [])
+    
+    if not records:
+        return {"skill": "routing_efficiency", "error": "No shipment data", "grounded_metrics": {"total_shipments": 0}}
+    
+    baseline_metrics = _compute_baseline_metrics(records)
+    context = {"customer_id": state.get("customer_id", "unknown")}
+    
+    executor = LLMSkillExecutor(skill_name="routing_efficiency", reasoning_effort="low")
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50
+    )
     
     return result
