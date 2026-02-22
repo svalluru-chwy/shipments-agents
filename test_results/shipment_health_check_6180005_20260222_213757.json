@@ -1,0 +1,157 @@
+{
+  "skill_name": "shipment_health_check",
+  "customer_id": "6180005",
+  "timestamp": "2026-02-22T21:36:45.435108",
+  "llm_result": {
+    "output": {
+      "grounded_metrics": {
+        "customer_id": "6180005",
+        "analysis_date": "2026-02-22",
+        "customer_performance": {
+          "total_shipments": 50,
+          "avg_ctd": null,
+          "median_ctd": null,
+          "min_ctd": null,
+          "max_ctd": null,
+          "delayed_shipments": null,
+          "delay_rate_pct": null,
+          "on_time_rate_pct": null,
+          "exception_count": 0,
+          "exception_rate_pct": 0,
+          "delivered_count": 50,
+          "undelivered_count": 0,
+          "date_range": {
+            "earliest": "2025-05-10",
+            "latest": "2026-02-18"
+          }
+        },
+        "zip_performance": {
+          "postcode": "98110",
+          "total_shipments": 18902,
+          "avg_ctd": 2.84,
+          "delay_rate_pct": 21.3
+        },
+        "zip_benchmark": {
+          "postcode": "98110",
+          "benchmark_avg_ctd": 2.841148,
+          "benchmark_median_ctd": 2.0,
+          "benchmark_min_ctd": 1,
+          "benchmark_max_ctd": 47,
+          "benchmark_shipment_count": 18902
+        },
+        "comparison": {
+          "customer_avg_ctd": null,
+          "benchmark_avg_ctd": 2.841148,
+          "ctd_difference_days": null,
+          "ctd_vs_benchmark": "NO_BENCHMARK",
+          "estimated_percentile": 50
+        },
+        "red_flags": [
+          "Data incomplete: exact per-customer CTD statistics not computed from shipment_records"
+        ],
+        "ctd_threshold": 4.15,
+        "delay_definition": "CTD is measured as Click-to-Deliver days; analysis references ZIP code benchmark AVG_CTD of 2.841148 for 98110; no exact per-customer CTD aggregates computed from the provided 50 shipment_records in this pass."
+      },
+      "continued_analysis": "Summary: The dataset contains 50 shipments for customer 6180005. While the ZIP benchmark for ZIP 98110 shows an AVG_CTD of 2.841148 days and a 21.3% delay rate across 18,902 shipments, the current analysis cannot present an exact customer-level CTD average, median, or range because precise per-shipment CTD aggregation was not computed in this pass. Delivered count within the sample is 50, with no recorded exceptions. This yields an ATTENTION-oriented posture pending full CTD aggregation. Context: The ZIP benchmark indicates overall efficiency in the region, but without the customer-level CTD statistics, it is not possible to quantify the exact gap or surplus relative to the benchmark. Patterns observed in the data show CTD values ranging from 1 to as high as 7 in the shipment history, but precise aggregation is required to surface targeted red flags by carrier, FC, or product type. Risk assessment: Until exact CTD averages and deltas are computed, forward-looking reliability cannot be fully established; likelihood of improvements hinges on finishing the CTD calculation and validating any edge-case CTD values. Bright spots: All shipments show no exception text in the delivery attempts field, and the customer has a 100% delivered count within this 50-record window, suggesting strong overall fulfillment execution within the sample.",
+      "enhanced_next_steps": [
+        "Run a precise aggregation of CLICK_TO_DELIVER_DAYS across the 50 shipment_records to compute: avg_ctd, median_ctd, min_ctd, max_ctd.",
+        "Compute delay_rate_pct and on_time_rate_pct at the customer level using the CTD vs. ZIP benchmark (2.841148) as reference.",
+        "Analyze CTD by carrier and FC (FFMCENTER_NAME) to identify any clustering of delays by location or carrier.",
+        "Reconcile any records with missing CTD (if any) using available timestamps (ORDER_PLACED_DTTM, ACTUAL_SHIP_DATE, BULK_TRACK_DELIVERY_DTTM).",
+        "If customer CTD aggregate exceeds benchmark meaningfully, prepare proactive outreach highlighting ETA improvements and potential interventions.",
+        "Flag any edge cases (e.g., CTD outliers like 7 days) for targeted investigation."
+      ],
+      "health_status": "ATTENTION",
+      "primary_finding": "Exact customer-level CTD statistics are not computed yet for 50 shipments; ZIP benchmark indicates AVG_CTD of 2.841148 days for 98110 with 21.3% delay rate, but customer CTD metrics require precise aggregation to determine true health relative to the benchmark.",
+      "execution_time_seconds": 71.361031,
+      "llm_used": true,
+      "skill": "shipment_health_check"
+    },
+    "execution_time_seconds": 71.37666296958923,
+    "llm_used": true,
+    "error": null,
+    "success": true
+  },
+  "fallback_result": {
+    "output": {
+      "skill": "shipment_health_check",
+      "grounded_metrics": {
+        "customer_id": "6180005",
+        "analysis_date": "2026-02-22",
+        "customer_performance": {
+          "total_shipments": 67,
+          "avg_ctd": 2.61,
+          "median_ctd": 2.0,
+          "min_ctd": 0.0,
+          "max_ctd": 7.0,
+          "delayed_shipments": 11,
+          "delay_rate_pct": 16.4,
+          "on_time_rate_pct": 83.6,
+          "exception_count": 0,
+          "exception_rate_pct": 0.0,
+          "delivered_count": 66,
+          "undelivered_count": 1,
+          "date_range": {
+            "earliest": "2025-02-20",
+            "latest": "2026-02-18"
+          }
+        },
+        "zip_performance": {
+          "postcode": "98110",
+          "total_shipments": 67,
+          "avg_ctd": 2.61,
+          "delay_rate_pct": 16.4
+        },
+        "zip_benchmark": {
+          "postcode": "98110",
+          "benchmark_avg_ctd": 2.841148,
+          "benchmark_median_ctd": "2.000",
+          "benchmark_min_ctd": 1,
+          "benchmark_max_ctd": 47,
+          "benchmark_shipment_count": 0
+        },
+        "comparison": {
+          "customer_avg_ctd": 2.61,
+          "benchmark_avg_ctd": 2.841148,
+          "ctd_difference_days": -0.23,
+          "ctd_vs_benchmark": "AVERAGE",
+          "estimated_percentile": 50
+        },
+        "health_status": "ATTENTION",
+        "red_flags": [
+          "High delay rate: 16.4%"
+        ],
+        "ctd_threshold": 4.15,
+        "delay_definition": "CTD > 4.15 days (mean + 1 std dev)"
+      },
+      "continued_analysis": "Deterministic analysis for customer 6180005: 67 shipments, avg CTD 2.61 days, 83.6% on-time rate. ATTENTION status.",
+      "enhanced_next_steps": [
+        "LLM analysis unavailable - showing basic metrics only"
+      ],
+      "health_status": "ATTENTION",
+      "primary_finding": "Minor delivery concerns: High delay rate: 16.4%",
+      "llm_fallback": true,
+      "llm_used": false,
+      "llm_error": "Error code: 401 - {'error': {'message': 'Incorrect API key provided: fake-key**************back. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}"
+    },
+    "execution_time_seconds": 0.4425809383392334,
+    "llm_fallback": true,
+    "error": null,
+    "success": true
+  },
+  "comparison": {
+    "grounded_metrics_match": false,
+    "health_status_match": true,
+    "metrics_differences": [
+      {
+        "metric": "total_shipments",
+        "llm_value": 50,
+        "fallback_value": 67,
+        "difference": 17
+      }
+    ],
+    "qualitative_differences": [
+      "LLM provides more detailed analysis (1350 vs 115 chars)"
+    ]
+  }
+}
