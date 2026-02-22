@@ -35,6 +35,8 @@ The Shipments Agency Platform processes customer shipment data through a multi-p
 
 ### What It Does
 
+**Pipeline Flow: 2 agents, 3 active phases, 15 skills**
+
 The platform analyzes customer shipment history to:
 
 1. **Detect anomalies** in delivery performance using statistical thresholds and pattern recognition
@@ -45,7 +47,7 @@ The platform analyzes customer shipment history to:
 
 ### Key Capabilities
 
-- **18 specialized skills** across 4 execution phases
+- **15 active skills** across 3 execution phases (18 total including archived)
 - **Deterministic + LLM hybrid approach** for accuracy and interpretability
 - **RESTful API** for integration with downstream systems
 - **Individual skill execution** for debugging and development
@@ -87,10 +89,12 @@ The platform analyzes customer shipment history to:
 
 1. **Data Loading**: Agent loads customer shipment data from S3 (7 pre-extracted Snowflake queries)
 2. **Check Gate**: LLM analyzes shipment health and determines if detailed analysis is needed
-3. **Phase 1**: 12 skills run in parallel (deterministic metrics + signal generation)
+3. **Phase 1**: 12 skills run in parallel (11 deterministic + 1 LLM signal generation)
 4. **Phase 2**: 2 LLM skills decode signals and predict delays for active shipments
 5. **Phase 3**: 1 deterministic skill computes cross-skill customer risk profile
 6. **Output**: Structured JSON + human-readable markdown reports saved to S3
+
+**Note**: The pipeline runs 3 active phases (1, 2, 3) with 15 total skills. Phase 4 and old Phase 3 skills are archived.
 
 ### Technology Stack
 
@@ -143,6 +147,12 @@ The platform analyzes customer shipment history to:
 
 ## Skills Catalog
 
+**Active Skills: 15** | **Archived Skills: 3** | **Total: 18**
+
+The platform includes 15 production skills across 3 active phases, plus 3 archived skills that exist in the codebase but are not wired into the pipeline.
+
+---
+
 ### Phase 1 — Deterministic Analysis (11 skills)
 
 These skills run in parallel and produce deterministic, reproducible results from shipment data.
@@ -182,13 +192,32 @@ These skills depend on Phase 1 results and use LLM for complex reasoning.
 |-------|-------------|--------|
 | **`customer_risk_profile`** | Deterministic cross-skill risk assessment | 4-dimensional risk profile (temporal, pattern, forward, relationship) |
 
-### Phase 4 — Not Used in Production Pipeline
+### Archived Skills — Not in Production Pipeline
 
-These skills exist in the codebase but are not wired into the production pipeline:
+The following skills exist in the codebase but are **not wired into the production pipeline**:
 
+#### Old Phase 3 Skills (Replaced)
 - **`shipment_intervention`** — Intervention determination (replaced by `customer_risk_profile`)
-- **`shipment_action_prioritizer`** — Action prioritization
-- **`shipment_consolidator`** — Executive summary consolidation
+- **`shipment_action_prioritizer`** — Action prioritization (not used)
+
+#### Phase 4 Skills (Not Implemented)
+- **`shipment_consolidator`** — Executive summary consolidation (not used)
+
+---
+
+### Pipeline Summary
+
+**What Actually Runs in Production:**
+
+| Phase | Skills | Type | Status |
+|-------|--------|------|--------|
+| Phase 1 | 12 skills | 11 deterministic + 1 LLM | ✅ Active |
+| Phase 2 | 2 skills | 2 LLM | ✅ Active |
+| Phase 3 | 1 skill | 1 deterministic | ✅ Active |
+| **Total Active** | **15 skills** | **12 deterministic + 3 LLM** | **✅** |
+| Archived | 3 skills | 2 old Phase 3 + 1 Phase 4 | ❌ Not in pipeline |
+
+**Execution Time:** Phase 1 (60-90s) → Phase 2 (30-100s) → Phase 3 (<1s) = **~2-4 minutes total**
 
 ---
 
@@ -534,7 +563,7 @@ Error responses return:
 1. **Extraction** (optional): 7 SQL queries extract customer data from Snowflake
 2. **Storage**: Data is stored in S3 at `s3://{bucket}/{base_path}/{customer_id}/`
 3. **Loading**: Agents load data from S3 on-demand
-4. **Processing**: Skills process data through 4 phases
+4. **Processing**: Skills process data through 3 active phases (15 skills total)
 5. **Output**: Results saved to S3 and returned via API
 
 ### S3 Data Structure
@@ -657,7 +686,7 @@ shipments-agents/
 │   │       │   └── agent.py            # Phase 2+3 skills
 │   │       ├── actions/                # ShipmentActionsAgent (dormant)
 │   │       │   └── agent.py
-│   │       └── skills/                 # 18 shipment analysis skills
+│   │       └── skills/                 # 18 shipment analysis skills (15 active, 3 archived)
 │   │           ├── CONTEXT.md          # Shared domain context
 │   │           ├── loader.py           # Skill metadata loader
 │   │           ├── runner.py           # Phased parallel execution
@@ -1039,7 +1068,7 @@ See `docs/channel_log.txt` for detailed implementation history and changes.
 
 **Latest Version**: 1.0.0 (2026-02-22)
 
-- ✅ 18 skills across 4 phases
+- ✅ 15 active skills across 3 phases (18 total including archived)
 - ✅ 2-agent pipeline (Signals + Decoder)
 - ✅ RESTful API with FastAPI
 - ✅ Docker deployment support
