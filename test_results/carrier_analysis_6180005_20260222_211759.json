@@ -1,0 +1,156 @@
+{
+  "skill_name": "carrier_analysis",
+  "customer_id": "6180005",
+  "timestamp": "2026-02-22T21:17:06.318314",
+  "llm_result": {
+    "output": {
+      "skill": "carrier_analysis",
+      "observations": [
+        "FedEx Express (FSMS) handles 46 of 67 shipments (68.7%).",
+        "OnTrac handles 20 of 67 shipments (29.9%).",
+        "There is a single shipment attributed to a null carrier (1 of 67 shipments, 1.5%), indicating an anomaly in the baseline carrier mapping.",
+        "OnTrac is the best performer with average CTD 1.9 days and 2 delayed shipments (10.0% delay rate).",
+        "FedEx Express (FSMS) has average CTD 2.89 days with 13 delayed shipments (28.3% delay rate) and 71.7% on-time.",
+        "No carrier exceptions were recorded across all shipments (exception_count = 0 for FedEx Express (FSMS) and OnTrac; 0 for null).",
+        "There are no flagged shipments to reference in this dataset."
+      ],
+      "summary": {
+        "overall_health": "CRITICAL",
+        "primary_finding": "FedEx Express (FSMS) remains the dominant carrier by volume but shows substantially higher delay risk compared to OnTrac, which is the current best performer by CTD.",
+        "best_carrier": "OnTrac",
+        "primary_carrier": "FedEx Express (FSMS)"
+      },
+      "continued_analysis": "OnTrac delivers with an average CTD of 1.9 days across a subset of FCs (e.g., PHX1, RNO1, PHX2), while FedEx Express (FSMS) averages 2.89 days and experiences higher delay rates (28.3%). This gap between the best and primary carriers highlights an optimization opportunity: gradually reallocate a portion of shipments from FedEx Express (FSMS) to OnTrac where feasible, and monitor changes in CTD and delay patterns. The zero-exception pattern across both carriers suggests consistency in handling exceptions, but the elevated FedEx delay rate warrants a targeted reallocation plan.",
+      "enhanced_next_steps": "1) Implement a controlled pilot to increase OnTrac share by 10-20% for non-pharmacy, non-heavy items and track CTD and delays; 2) For high-value or time-sensitive orders, preferentially route through OnTrac where FC-level performance evidence exists; 3) Validate FC-specific routing by comparing PHX1/RNO1/PHX2 performance and adjust dispatch rules; 4) Maintain a threshold-based fallback: if OnTrac CTD exceeds FedEx Express by more than 0.5 days for a FC, revert to FedEx Express for that FC until data stabilizes; 5) Monitor flagged shipments for any emerging issues and incorporate into ongoing risk scoring; 6) Periodically re-run the carrier performance dashboard to ensure the health status updates as delays rise or fall.",
+      "grounded_metrics": {
+        "total_shipments": 67,
+        "carriers": {
+          "FedEx Express (FSMS)": {
+            "count": 46,
+            "percentage": 68.7,
+            "avg_ctd": 2.89,
+            "min_ctd": 0.0,
+            "max_ctd": 7.0,
+            "delayed_count": 13,
+            "delayed_pct": 0.283,
+            "on_time_pct": 0.717,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          },
+          "OnTrac": {
+            "count": 20,
+            "percentage": 29.9,
+            "avg_ctd": 1.9,
+            "min_ctd": 1.0,
+            "max_ctd": 5.0,
+            "delayed_count": 2,
+            "delayed_pct": 0.1,
+            "on_time_pct": 0.9,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          },
+          "null": {
+            "count": 1,
+            "percentage": 1.5,
+            "avg_ctd": 4.0,
+            "min_ctd": 4.0,
+            "max_ctd": 4.0,
+            "delayed_count": 1,
+            "delayed_pct": 100.0,
+            "on_time_pct": 0.0,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          }
+        },
+        "primary_carrier": "FedEx Express (FSMS)",
+        "best_performer": "OnTrac",
+        "carrier_with_issues": null
+      },
+      "flagged_shipments": [],
+      "execution_time_seconds": 52.810108,
+      "llm_used": true
+    },
+    "execution_time_seconds": 52.81975603103638,
+    "llm_used": true,
+    "error": null,
+    "success": true
+  },
+  "fallback_result": {
+    "output": {
+      "skill": "carrier_analysis",
+      "observations": [
+        "FedEx Express (FSMS) handled 68.7% of shipments with an average CTD of 2.89 days.",
+        "OnTrac handled 29.9% of shipments with an average CTD of 1.9 days.",
+        "None handled 1.5% of shipments with an average CTD of 4.0 days."
+      ],
+      "summary": {
+        "primary_carrier": "FedEx Express (FSMS)",
+        "best_performer": "OnTrac",
+        "carrier_with_issues": null,
+        "key_finding": "FedEx Express (FSMS) is the primary carrier"
+      },
+      "continued_analysis": "Carrier analysis (deterministic fallback): FedEx Express (FSMS) handles 68.7% of shipments.",
+      "enhanced_next_steps": "Monitor carrier performance.",
+      "grounded_metrics": {
+        "total_shipments": 67,
+        "carriers": {
+          "FedEx Express (FSMS)": {
+            "count": 46,
+            "percentage": 68.7,
+            "avg_ctd": 2.89,
+            "min_ctd": 0.0,
+            "max_ctd": 7.0,
+            "delayed_count": 13,
+            "delayed_pct": 28.3,
+            "on_time_pct": 71.7,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          },
+          "OnTrac": {
+            "count": 20,
+            "percentage": 29.9,
+            "avg_ctd": 1.9,
+            "min_ctd": 1.0,
+            "max_ctd": 5.0,
+            "delayed_count": 2,
+            "delayed_pct": 10.0,
+            "on_time_pct": 90.0,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          },
+          "null": {
+            "count": 1,
+            "percentage": 1.5,
+            "avg_ctd": 4.0,
+            "min_ctd": 4.0,
+            "max_ctd": 4.0,
+            "delayed_count": 1,
+            "delayed_pct": 100.0,
+            "on_time_pct": 0.0,
+            "exception_count": 0,
+            "exception_rate": 0.0
+          }
+        },
+        "primary_carrier": "FedEx Express (FSMS)",
+        "best_performer": "OnTrac",
+        "carrier_with_issues": null
+      },
+      "flagged_shipments": [],
+      "llm_used": false,
+      "llm_fallback": true,
+      "llm_error": "Error code: 401 - {'error': {'message': 'Incorrect API key provided: fake-key**************back. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}"
+    },
+    "execution_time_seconds": 0.24558091163635254,
+    "llm_fallback": true,
+    "error": null,
+    "success": true
+  },
+  "comparison": {
+    "grounded_metrics_match": true,
+    "health_status_match": true,
+    "metrics_differences": [],
+    "qualitative_differences": [
+      "LLM provides more detailed analysis (582 vs 91 chars)"
+    ]
+  }
+}

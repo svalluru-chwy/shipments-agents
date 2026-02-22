@@ -2,11 +2,11 @@
 Delivery Performance Skill - Analyzes CTD patterns and identifies delayed shipments.
 """
 
-import json
-import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import statistics
+
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
 
 
 def _parse_date(val: Any) -> Optional[datetime]:
@@ -21,37 +21,15 @@ def _parse_date(val: Any) -> Optional[datetime]:
     except (ValueError, TypeError):
         return None
 
-from openai import OpenAI
-from packages.agents.shipments.skills.loader import load_skill_instructions
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano-2025-08-07")
-
-
-def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
-    """Execute the delivery performance skill."""
-    customer_id = state.get("customer_id", "unknown")
-    prompt_logger = state.get("prompt_logger")
-    
-    # Get shipment data
-    shipment_data = state.get("shipment_data", {})
-    records = shipment_data.get("records", [])
-    baseline = shipment_data.get("baseline", {})
-    
-    if not records:
-        return {
-            "skill": "delivery_performance",
-            "error": "No shipment data available",
-            "grounded_metrics": {"total_shipments": 0}
-        }
-    
-    # Pre-calculate grounded metrics (no LLM needed for these)
+def _compute_baseline_metrics(records: List[Dict[str, Any]], ctd_threshold: float) -> Dict[str, Any]:
+    """Compute baseline metrics from shipment records (deterministic)."""
     ctd_values = []
-    ctd_sources = []  # "actual" or "estimated" per CTD value
+    ctd_sources = []
     delayed_shipments = []
     carrier_stats = {}
     fc_stats = {}
-    
-    ctd_threshold = baseline.get("ctd_threshold", 3.0)
+    total = len(records)
     
     for record in records:
         ctd = record.get("CLICK_TO_DELIVER_DAYS")
@@ -107,7 +85,6 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             except (ValueError, TypeError):
                 pass
     
-    total = len(records)
     avg_ctd = round(statistics.mean(ctd_values), 2) if ctd_values else 0
     median_ctd = round(statistics.median(ctd_values), 1) if ctd_values else 0
     min_ctd = min(ctd_values) if ctd_values else 0
@@ -150,8 +127,7 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     estimated_ctd_count = ctd_sources.count("estimated")
     no_ctd_count = total - len(ctd_values)
 
-    # Build grounded metrics
-    grounded_metrics = {
+    return {
         "total_shipments": total,
         "avg_ctd": avg_ctd,
         "median_ctd": median_ctd,
@@ -168,76 +144,78 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         "actual_ctd_count": actual_ctd_count,
         "estimated_ctd_count": estimated_ctd_count,
         "no_ctd_count": no_ctd_count,
-        "delay_definition": f"CTD > {ctd_threshold} days"
+        "delay_definition": f"CTD > {ctd_threshold} days",
+        "delayed_shipments": delayed_shipments
     }
+
+
+def _deterministic_fallback(records: List[Dict[str, Any]], baseline: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic fallback if LLM fails."""
+    ctd_threshold = baseline.get("ctd_threshold", 3.0)
+    metrics = _compute_baseline_metrics(records, ctd_threshold)
     
-    # Determine health status
-    if delayed_pct <= 5:
-        health = "HEALTHY"
-    elif delayed_pct <= 15:
-        health = "ATTENTION"
-    else:
-        health = "CRITICAL"
+    delayed_shipments = metrics.pop("delayed_shipments")
+    health = "HEALTHY" if metrics["delayed_pct"] <= 5 else "ATTENTION" if metrics["delayed_pct"] <= 15 else "CRITICAL"
     
     # Build observations
-    ctd_coverage = f"{actual_ctd_count} actual"
-    if estimated_ctd_count > 0:
-        ctd_coverage += f", {estimated_ctd_count} estimated"
-    if no_ctd_count > 0:
-        ctd_coverage += f", {no_ctd_count} without CTD"
+    ctd_coverage = f"{metrics['actual_ctd_count']} actual"
+    if metrics['estimated_ctd_count'] > 0:
+        ctd_coverage += f", {metrics['estimated_ctd_count']} estimated"
+    if metrics['no_ctd_count'] > 0:
+        ctd_coverage += f", {metrics['no_ctd_count']} without CTD"
+    
     observations = [
-        f"Total shipments processed: {total} ({ctd_coverage}).",
-        f"Average Click-to-Deliver (CTD) time is {avg_ctd} days, with a maximum of {max_ctd} days.",
-        f"{delayed_pct}% of shipments ({delayed_count} out of {total}) exceeded the {ctd_threshold}-day CTD threshold."
+        f"Total shipments processed: {metrics['total_shipments']} ({ctd_coverage}).",
+        f"Average Click-to-Deliver (CTD) time is {metrics['avg_ctd']} days, with a maximum of {metrics['max_ctd']} days.",
+        f"{metrics['delayed_pct']}% of shipments ({metrics['delayed_count']} out of {metrics['total_shipments']}) exceeded the {ctd_threshold}-day CTD threshold."
     ]
-    if estimated_ctd_count > 0:
-        observations.append(
-            f"Note: {estimated_ctd_count} shipment(s) used estimated CTD computed from expected delivery dates."
-        )
-    if no_ctd_count > 0:
-        observations.append(
-            f"Note: {no_ctd_count} shipment(s) have no CTD value and are excluded from analysis."
-        )
     
-    # Add delayed shipment details
-    for ds in delayed_shipments[:3]:  # Limit to first 3
-        observations.append(
-            f"The delayed shipment (Order ID: {ds['order_id']}, Tracking Number: {ds['tracking_number']}) had a CTD of {ds['ctd_days']} days."
-        )
-    
-    # Add carrier info
-    if carrier_summary:
-        primary_carrier = max(carrier_summary.items(), key=lambda x: x[1]["count"])
-        observations.append(
-            f"{primary_carrier[0]} accounted for {primary_carrier[1]['percentage']}% of shipments, averaging a CTD of {primary_carrier[1]['avg_ctd']} days."
-        )
-    
-    # Add FC info
-    if fc_summary:
-        best_fc = min(fc_summary.items(), key=lambda x: x[1]["avg_ctd"])
-        observations.append(
-            f"{best_fc[0]} fulfillment center had the best performance with an average CTD of {best_fc[1]['avg_ctd']} days."
-        )
-    
-    # Add trend
-    if trend_direction != "INSUFFICIENT_DATA":
-        observations.append(
-            f"The trend analysis indicates {'an improving' if trend_direction == 'IMPROVING' else 'a stable' if trend_direction == 'STABLE' else 'a declining'} CTD performance, with a change of {trend_change} days from the first half to the second half of the period."
-        )
-    
-    # Build result
-    result = {
+    return {
         "skill": "delivery_performance",
         "observations": observations,
         "summary": {
             "overall_health": health,
-            "primary_finding": f"CTD averaging {avg_ctd} days {'is stable' if health == 'HEALTHY' else 'has ' + str(delayed_pct) + '% of shipments exceeding the ' + str(ctd_threshold) + '-day threshold.'}",
-            "trend_direction": trend_direction
+            "primary_finding": f"CTD averaging {metrics['avg_ctd']} days",
+            "trend_direction": metrics["trend_direction"]
         },
-        "continued_analysis": f"The delivery performance analysis shows that while the average Click-to-Deliver (CTD) time is {avg_ctd} days, there {'are no major concerns' if delayed_count == 0 else f'is a notable concern with {delayed_pct}% of shipments exceeding the {ctd_threshold}-day threshold'}. {'No shipments were delayed.' if delayed_count == 0 else f'The delayed shipments include Order IDs: {', '.join([str(d['order_id']) for d in delayed_shipments[:3] if d.get('order_id')])}.'} The overall trend is {trend_direction.lower()}, with a change of {trend_change} days in CTD from the first half to the second half of the analysis period.",
-        "enhanced_next_steps": f"{'Continue monitoring shipment performance.' if health == 'HEALTHY' else 'Monitor the performance of delayed shipments closely. ' + ('Focus on ' + primary_carrier[0] + ' carrier performance.' if carrier_summary else '')}",
+        "continued_analysis": f"Delivery performance analysis (deterministic fallback): {metrics['delayed_count']} delayed shipments, trend is {metrics['trend_direction'].lower()}.",
+        "enhanced_next_steps": "Monitor shipment performance." if health == "HEALTHY" else "Monitor delayed shipments closely.",
         "flagged_shipments": delayed_shipments,
-        "grounded_metrics": grounded_metrics
+        "grounded_metrics": metrics
+    }
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """Execute the delivery performance skill with LLM analysis."""
+    customer_id = state.get("customer_id", "unknown")
+    shipment_data = state.get("shipment_data", {})
+    records = shipment_data.get("records", [])
+    baseline = shipment_data.get("baseline", {})
+    
+    if not records:
+        return {
+            "skill": "delivery_performance",
+            "error": "No shipment data available",
+            "grounded_metrics": {"total_shipments": 0}
+        }
+    
+    ctd_threshold = baseline.get("ctd_threshold", 3.0)
+    baseline_metrics = _compute_baseline_metrics(records, ctd_threshold)
+    delayed_shipments = baseline_metrics.pop("delayed_shipments")
+    
+    context = {
+        "customer_id": customer_id,
+        "delayed_shipments": delayed_shipments
     }
     
+    executor = LLMSkillExecutor(skill_name="delivery_performance", reasoning_effort="medium")
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50
+    )
+    
     return result
+

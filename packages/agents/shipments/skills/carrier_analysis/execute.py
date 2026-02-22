@@ -2,10 +2,11 @@
 Carrier Analysis Skill - Analyzes carrier performance patterns.
 """
 
-import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 import statistics
+
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
 
 
 def _parse_date(val: Any) -> Optional[datetime]:
@@ -21,25 +22,11 @@ def _parse_date(val: Any) -> Optional[datetime]:
         return None
 
 
-def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
-    """Execute the carrier analysis skill."""
-    customer_id = state.get("customer_id", "unknown")
-    
-    shipment_data = state.get("shipment_data", {})
-    records = shipment_data.get("records", [])
-    baseline = shipment_data.get("baseline", {})
-    ctd_threshold = baseline.get("ctd_threshold", 3.0)
-    
-    if not records:
-        return {
-            "skill": "carrier_analysis",
-            "error": "No shipment data available",
-            "grounded_metrics": {"total_shipments": 0}
-        }
-    
-    # Analyze by carrier
+def _compute_baseline_metrics(records: List[Dict[str, Any]], ctd_threshold: float) -> Dict[str, Any]:
+    """Compute baseline carrier metrics (deterministic)."""
     carrier_stats = {}
     total = len(records)
+    flagged_shipments = []
     
     for record in records:
         carrier = record.get("WAREHOUSE_CARRIER", "Unknown")
@@ -81,6 +68,16 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         exc_desc = str(record.get("BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION", "") or "")
         if exc_desc and exc_desc.lower() not in ("no exception", "", "none"):
             carrier_stats[carrier]["exceptions"] += 1
+            
+            # Flag shipments with exceptions for detailed analysis
+            if ctd_val and ctd_val > ctd_threshold:
+                flagged_shipments.append({
+                    "order_id": record.get("ORDER_ID"),
+                    "tracking_number": record.get("SHIPMENT_TRACKING_NUMBER"),
+                    "carrier": carrier,
+                    "issue": f"Delayed - {ctd_val} day CTD",
+                    "fc": record.get("FFMCENTER_NAME")
+                })
     
     # Build carrier summary
     carriers = {}
@@ -101,48 +98,88 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         }
     
     # Identify primary carrier
-    primary_carrier = max(carriers.items(), key=lambda x: x[1]["count"])[0]
+    primary_carrier = max(carriers.items(), key=lambda x: x[1]["count"])[0] if carriers else "Unknown"
     
     # Identify best performer (lowest avg CTD with >1 shipment)
     valid_carriers = {k: v for k, v in carriers.items() if v["count"] > 1 and v["avg_ctd"] > 0}
     best_performer = min(valid_carriers.items(), key=lambda x: x[1]["avg_ctd"])[0] if valid_carriers else primary_carrier
     
-    # Identify carrier with issues (highest delayed_pct)
+    # Identify carrier with issues (highest delayed_pct > 15%)
     carriers_with_delays = {k: v for k, v in carriers.items() if v["delayed_pct"] > 15}
     carrier_with_issues = max(carriers_with_delays.items(), key=lambda x: x[1]["delayed_pct"])[0] if carriers_with_delays else None
     
-    # Build observations
+    return {
+        "total_shipments": total,
+        "carriers": carriers,
+        "primary_carrier": primary_carrier,
+        "best_performer": best_performer,
+        "carrier_with_issues": carrier_with_issues,
+        "flagged_shipments": flagged_shipments
+    }
+
+
+def _deterministic_fallback(records: List[Dict[str, Any]], baseline: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic fallback if LLM fails."""
+    ctd_threshold = baseline.get("ctd_threshold", 3.0)
+    metrics = _compute_baseline_metrics(records, ctd_threshold)
+    
+    flagged_shipments = metrics.pop("flagged_shipments")
+    carriers = metrics["carriers"]
+    primary_carrier = metrics["primary_carrier"]
+    
     observations = []
     for carrier, stats in sorted(carriers.items(), key=lambda x: -x[1]["count"]):
         observations.append(
             f"{carrier} handled {stats['percentage']}% of shipments with an average CTD of {stats['avg_ctd']} days."
         )
-        if stats["delayed_count"] > 0:
-            observations.append(
-                f"{carrier} had {stats['delayed_count']} delayed shipment(s), resulting in a {stats['delayed_pct']}% delayed rate."
-            )
-        observations.append(
-            f"{carrier} {'reported no exceptions' if stats['exception_count'] == 0 else f'had {stats['exception_count']} exception(s)'}, resulting in an exception rate of {stats['exception_rate']}%."
-        )
-        observations.append(
-            f"{carrier} achieved a {stats['on_time_pct']}% on-time delivery rate."
-        )
     
-    result = {
+    return {
         "skill": "carrier_analysis",
         "observations": observations,
         "summary": {
             "primary_carrier": primary_carrier,
-            "best_performer": best_performer,
-            "carrier_with_issues": carrier_with_issues,
-            "key_finding": f"{primary_carrier} is the primary carrier, handling {carriers[primary_carrier]['percentage']}% of shipments with {'the lowest' if primary_carrier == best_performer else 'an'} average CTD of {carriers[primary_carrier]['avg_ctd']} days."
+            "best_performer": metrics["best_performer"],
+            "carrier_with_issues": metrics["carrier_with_issues"],
+            "key_finding": f"{primary_carrier} is the primary carrier"
         },
-        "continued_analysis": f"The analysis of carrier performance reveals that {primary_carrier} is the primary carrier, managing {carriers[primary_carrier]['percentage']}% of the total shipments with an average CTD of {carriers[primary_carrier]['avg_ctd']} days. " + (f"Despite having {carriers[primary_carrier]['delayed_count']} delayed shipment(s), it maintained an on-time delivery rate of {carriers[primary_carrier]['on_time_pct']}%." if carriers[primary_carrier]['delayed_count'] > 0 else f"It maintained a perfect on-time delivery rate."),
-        "enhanced_next_steps": f"Continue monitoring {primary_carrier} performance. " + (f"Consider addressing issues with {carrier_with_issues} which has a {carriers[carrier_with_issues]['delayed_pct']}% delay rate." if carrier_with_issues else "All carriers are performing within acceptable thresholds."),
-        "grounded_metrics": {
-            "total_shipments": total,
-            "carriers": carriers
+        "continued_analysis": f"Carrier analysis (deterministic fallback): {primary_carrier} handles {carriers[primary_carrier]['percentage']}% of shipments.",
+        "enhanced_next_steps": "Monitor carrier performance.",
+        "grounded_metrics": {k: v for k, v in metrics.items() if k != "flagged_shipments"},
+        "flagged_shipments": flagged_shipments
+    }
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """Execute the carrier analysis skill with LLM analysis."""
+    customer_id = state.get("customer_id", "unknown")
+    shipment_data = state.get("shipment_data", {})
+    records = shipment_data.get("records", [])
+    baseline = shipment_data.get("baseline", {})
+    ctd_threshold = baseline.get("ctd_threshold", 3.0)
+    
+    if not records:
+        return {
+            "skill": "carrier_analysis",
+            "error": "No shipment data available",
+            "grounded_metrics": {"total_shipments": 0}
         }
+    
+    baseline_metrics = _compute_baseline_metrics(records, ctd_threshold)
+    flagged_shipments = baseline_metrics.pop("flagged_shipments")
+    
+    context = {
+        "customer_id": customer_id,
+        "flagged_shipments": flagged_shipments
     }
     
+    executor = LLMSkillExecutor(skill_name="carrier_analysis", reasoning_effort="medium")
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50
+    )
+    
     return result
+

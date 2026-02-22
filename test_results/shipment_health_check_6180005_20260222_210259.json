@@ -1,0 +1,96 @@
+{
+  "skill_name": "shipment_health_check",
+  "customer_id": "6180005",
+  "timestamp": "2026-02-22T21:01:14.211577",
+  "llm_result": {
+    "output": {
+      "grounded_metrics": {
+        "customer_id": "6180005",
+        "analysis_date": "2026-02-22",
+        "customer_performance": {
+          "total_shipments": 50,
+          "avg_ctd": 2.61,
+          "median_ctd": 2.0,
+          "min_ctd": 0.0,
+          "max_ctd": 7.0,
+          "delayed_shipments": null,
+          "delay_rate_pct": null,
+          "on_time_rate_pct": null,
+          "exception_count": null,
+          "exception_rate_pct": null,
+          "delivered_count": 50,
+          "undelivered_count": 0,
+          "date_range": {
+            "earliest": "2025-02-20",
+            "latest": "2026-02-18"
+          }
+        },
+        "zip_performance": {
+          "postcode": "98110",
+          "total_shipments": 50,
+          "avg_ctd": 2.61,
+          "delay_rate_pct": null
+        },
+        "zip_benchmark": {
+          "postcode": "98110",
+          "benchmark_avg_ctd": 2.841148,
+          "benchmark_median_ctd": 2.0,
+          "benchmark_min_ctd": 1,
+          "benchmark_max_ctd": 47,
+          "benchmark_shipment_count": 18902
+        },
+        "comparison": {
+          "customer_avg_ctd": 2.61,
+          "benchmark_avg_ctd": 2.84,
+          "ctd_difference_days": -0.23,
+          "ctd_vs_benchmark": "AVERAGE",
+          "estimated_percentile": 55
+        },
+        "ctd_threshold": 4.15,
+        "delay_definition": "Delays defined as deliveries occurring later than the shipment's estimated delivery date; CTD is captured as Click-to-Deliver Days."
+      },
+      "continued_analysis": "Summary: Analyzing 50 shipments for customer 6180005 (ZIP 98110) shows an average Click-to-Deliver (CTD) of 2.61 days with a median of 2.0 days, peaking at 7.0 days. This CTD is slightly better than the ZIP benchmark average CTD of 2.84 days, resulting in a CTD difference of -0.23 days and a computed percentile of approximately 55. While the ZIP benchmark suggests a moderate late-delivery tendency at the ZIP level, the customer\u2019s CTD remains within an acceptable band relative to that benchmark. Patterns: The CTD distribution appears centered around 2\u20133 days with occasional tail deliveries up to 7 days, indicating a long-tail risk. However, the provided data lacks explicit per-shipment delay flags (SHIPMENT_WAS_DELAYED) and a complete breakdown of delays by carrier, FC, or product type, which prevents precise red-flag quantification at this time. No explicit red flags could be confirmed from the available fields (e.g., SHIPMENT_WAS_DELAYED, detailed exception types). Context: All 50 shipments report a ZIP code of 98110, which aligns with the zip_benchmark context for this customer. The early-to-late window spans from 2025-02-20 to 2026-02-18, indicating the evaluation period covers roughly 12 months, enabling trend observation in future updates. Risk assessment: With data gaps for delay flags and exception rates, there is limited visibility into precise operational risk. The CTD is near target, but tail-delivery events (CTD >= 4) could still impact customer satisfaction if not mitigated. Bright spots: The CTD performance is better than the ZIP benchmark on average, and delivered counts are high within the sample, suggesting generally reliable fulfillment for this household. Actions should prioritize closing data gaps and monitoring tail CTD shipments to prevent erosion of satisfaction as the household engages with Chewy across multiple pets and products.",
+      "enhanced_next_steps": [
+        "Request shipment-level delay flags (SHIPMENT_WAS_DELAYED) and detailed exception codes to compute precise red flags (delay_rate, exception_rate) for the 50 shipments.",
+        "Identify tail-CTD shipments (e.g., CTD > 3 days) for proactive outreach and to investigate root causes (carrier, FC, product type, or route).",
+        "Cross-tab CTD by warehouse center and carrier (e.g., FedEx FSMS vs OnTrac) to detect systematic delays; prioritize process improvements where tail CTD is concentrated.",
+        "Align proactive communications with the customer for autoship items, especially for multi-pet households, to reinforce delivery reliability and set expectations.",
+        "Aim to reduce CTD by at least 0.1\u20130.2 days in the next 4\u20136 weeks by addressing tail deliveries and optimizing route planning, while continuing to monitor CTD vs ZIP benchmarks."
+      ],
+      "health_status": "ATTENTION",
+      "primary_finding": "Customer 6180005 shows ATTENTION health status with avg CTD 2.61 days, slightly better than ZIP 98110 benchmark (2.84 days), yielding a CTD difference of -0.23 days and an estimated percentile of 55.",
+      "execution_time_seconds": 105.332643,
+      "llm_used": true,
+      "skill": "shipment_health_check"
+    },
+    "execution_time_seconds": 105.33601474761963,
+    "llm_used": true,
+    "error": null,
+    "success": true
+  },
+  "fallback_result": {
+    "output": {
+      "skill": "shipment_health_check",
+      "error": "Logger._log() got an unexpected keyword argument 'error_type'",
+      "grounded_metrics": {}
+    },
+    "execution_time_seconds": 0.28062009811401367,
+    "llm_fallback": false,
+    "error": "Logger._log() got an unexpected keyword argument 'error_type'",
+    "success": false
+  },
+  "comparison": {
+    "grounded_metrics_match": false,
+    "health_status_match": false,
+    "metrics_differences": [
+      {
+        "metric": "health_status",
+        "llm_value": "ATTENTION",
+        "fallback_value": null
+      }
+    ],
+    "qualitative_differences": [
+      "LLM provides more detailed analysis (1885 vs 0 chars)"
+    ]
+  }
+}

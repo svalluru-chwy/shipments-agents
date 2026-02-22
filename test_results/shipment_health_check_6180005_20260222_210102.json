@@ -1,0 +1,66 @@
+{
+  "skill_name": "shipment_health_check",
+  "customer_id": "6180005",
+  "timestamp": "2026-02-22T20:59:55.442352",
+  "llm_result": {
+    "output": {
+      "grounded_metrics": {
+        "customer_id": "6180005",
+        "analysis_date": "2026-02-22",
+        "customer_performance": {
+          "total_shipments": 50,
+          "avg_ctd": 2.4,
+          "median_ctd": 2.0,
+          "min_ctd": 1.0,
+          "max_ctd": 7.0,
+          "delayed_shipments": null,
+          "delay_rate_pct": null,
+          "on_time_rate_pct": null,
+          "exception_count": 0,
+          "exception_rate_pct": 0.0,
+          "delivered_count": 50,
+          "undelivered_count": 0,
+          "date_range": {
+            "earliest": "2025-04-23",
+            "latest": "2026-01-19"
+          }
+        },
+        "zip_performance": {
+          "postcode": "98110",
+          "total_shipments": 50,
+          "avg_ctd": 2.841148,
+          "delay_rate_pct": 21.3
+        },
+        "zip_benchmark": {
+          "postcode": "98110",
+          "benchmark_avg_ctd": 2.841148,
+          "benchmark_median_ctd": 2.0,
+          "benchmark_min_ctd": 1,
+          "benchmark_max_ctd": 47,
+          "benchmark_shipment_count": 18902
+        },
+        "comparison": {
+          "customer_avg_ctd": 2.4,
+          "benchmark_avg_ctd": 2.841148,
+          "ctd_difference_days": -0.44,
+          "ctd_vs_benchmark": "AVERAGE",
+          "estimated_percentile": 59
+        },
+        "health_status": "HEALTHY",
+        "red_flags": [],
+        "ctd_threshold": 4.15,
+        "delay_definition": "CTD delay threshold defined as CTD exceeding 4.15 days."
+      },
+      "continued_analysis": "Summary: Customer 6180005 demonstrates a HEALTHY delivery health status for the 50 shipments analyzed in this dataset, with an average CTD of 2.40 days (median 2.00). This CTD is modestly better than the ZIP benchmark for 98110 (average CTD 2.84 days). The estimated percentile against the ZIP benchmark is 59, indicating performance near the 60th percentile. Patterns observed show consistent on-time performance with CTD values ranging from 1 to 7 days, and all shipments appear delivered within the dataset scope. No explicit red flags were detected (no documented exceptions beyond ",
+      "execution_time_seconds": 66.847962,
+      "llm_used": true,
+      "skill": "shipment_health_check"
+    },
+    "execution_time_seconds": 66.8582489490509,
+    "llm_used": true,
+    "error": null,
+    "success": true
+  },
+  "fallback_result": null,
+  "comparison": {}
+}
