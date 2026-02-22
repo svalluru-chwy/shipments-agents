@@ -1,13 +1,19 @@
 """
-Shipment Health Check Skill - BASE skill for shipments analysis.
+Shipment Health Check Skill - LLM-powered with deterministic fallback.
 
-Computes customer delivery performance vs ZIP benchmark.
+Analyzes customer delivery performance vs ZIP benchmark using AI for nuanced insights.
+Falls back to deterministic calculation if LLM fails.
 """
 
 import json
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
 import statistics
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+
+from packages.shared.logging import get_logger
+from packages.agents.shipments.skills.llm_skill_base import LLMSkillExecutor
+
+logger = get_logger(__name__)
 
 
 def _parse_date(val: Any) -> Optional[datetime]:
@@ -23,43 +29,39 @@ def _parse_date(val: Any) -> Optional[datetime]:
         return None
 
 
-def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+def _compute_baseline_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Execute the shipment health check skill.
+    Compute baseline metrics from shipment records (deterministic).
     
-    This is a BASE skill that runs on raw data without LLM calls.
-    All metrics are pre-calculated in Python to prevent hallucination.
+    This provides the LLM with pre-calculated metrics to prevent hallucination.
+    Also used as fallback if LLM fails.
     """
-    customer_id = state.get("customer_id", "unknown")
-    
-    # Get shipment data from state
-    shipment_data = state.get("shipment_data", {})
-    records = shipment_data.get("records", [])
-    
     if not records:
         return {
-            "error": "No shipment data available",
-            "grounded_metrics": {
-                "total_shipments": 0,
-                "health_status": "UNKNOWN"
-            }
+            "total_shipments": 0,
+            "avg_ctd": 0,
+            "median_ctd": 0,
+            "ctd_threshold": 3.0,
+            "delayed_count": 0,
+            "delay_rate": 0,
+            "on_time_rate": 100,
+            "exception_count": 0,
+            "delivered_count": 0,
+            "undelivered_count": 0
         }
     
-    # Calculate customer performance metrics
+    # Calculate CTD values
     ctd_values = []
-    ctd_sources = []  # Track whether each CTD is "actual" or "estimated"
+    ctd_sources = []
     exception_count = 0
     dates = []
-
+    
     for record in records:
         ctd = record.get("CLICK_TO_DELIVER_DAYS")
         ctd_source = "actual"
-
+        
+        # Estimated CTD fallback
         if ctd is None:
-            # Estimated CTD fallback: compute from available dates
-            #   delivery proxy: BULK_TRACK_DELIVERY_DTTM -> SHIPMENT_ESTIMATED_DELIVERY_DATE
-            #                   -> WIZMO_CURRENT_ARRIVAL_DATE -> LAST_EXPECTED_DELIVERY_DATE
-            #   order date: ORDER_PLACED_DTTM
             order_dt = _parse_date(record.get("ORDER_PLACED_DTTM"))
             delivery_proxy = _parse_date(
                 record.get("BULK_TRACK_DELIVERY_DTTM")
@@ -70,19 +72,19 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             if order_dt and delivery_proxy:
                 ctd = (delivery_proxy - order_dt).days
                 ctd_source = "estimated"
-
+        
         if ctd is not None:
             try:
                 ctd_values.append(float(ctd))
                 ctd_sources.append(ctd_source)
             except (ValueError, TypeError):
                 pass
-
-        # S3 uses BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION (not EXCEPTION_FLAG)
+        
+        # Exception detection
         exc_desc = str(record.get("BULK_TRACK_DELIVERY_ATTEMPT_EXCEPTION", "") or "")
         if exc_desc and exc_desc.lower() not in ("no exception", "", "none"):
             exception_count += 1
-
+        
         # Track dates
         for date_field in ["BULK_TRACK_DELIVERY_DTTM", "ACTUAL_SHIP_DATE"]:
             date_val = record.get(date_field)
@@ -93,9 +95,7 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
                 except:
                     pass
     
-    # Delivered classification with fallback:
-    #   Primary: BULK_TRACK_DELIVERY_DTTM is not None
-    #   Fallback: SHIPMENT_STATUS or WIZMO_CURRENT_PKG_STATUS == "DELIVERED"
+    # Delivered vs undelivered classification
     delivered_count = 0
     undelivered_count = 0
     for record in records:
@@ -106,46 +106,78 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             delivered_count += 1
         else:
             undelivered_count += 1
-
+    
+    # Calculate metrics
     total_shipments = len(records)
     avg_ctd = round(statistics.mean(ctd_values), 2) if ctd_values else 0
-
-    # Compute CTD threshold (mean + 1 std dev) for delay detection
+    median_ctd = round(statistics.median(ctd_values), 1) if ctd_values else 0
+    min_ctd = min(ctd_values) if ctd_values else 0
+    max_ctd = max(ctd_values) if ctd_values else 0
+    
+    # CTD threshold (mean + 1 std dev)
     if len(ctd_values) > 1:
         ctd_std = statistics.stdev(ctd_values)
         ctd_threshold = round(avg_ctd + ctd_std, 2) if ctd_std else avg_ctd
     else:
         ctd_threshold = avg_ctd if avg_ctd else 3.0
-
-    # Delayed = CTD > threshold (pure CTD-based detection)
+    
+    # Delayed count
     delayed_count = sum(1 for v in ctd_values if v > ctd_threshold)
-    estimated_ctd_count = ctd_sources.count("estimated")
-    median_ctd = round(statistics.median(ctd_values), 1) if ctd_values else 0
-    min_ctd = min(ctd_values) if ctd_values else 0
-    max_ctd = max(ctd_values) if ctd_values else 0
     delay_rate = round((delayed_count / total_shipments) * 100, 1) if total_shipments > 0 else 0
     on_time_rate = round(100 - delay_rate, 1)
     exception_rate = round((exception_count / total_shipments) * 100, 1) if total_shipments > 0 else 0
+    estimated_ctd_count = ctd_sources.count("estimated")
     
-    # Get ZIP performance data (check node uses shortened keys: customer_zip, benchmark_zip)
-    zip_perf = shipment_data.get("customer_zip_performance") or shipment_data.get("customer_zip") or {}
-    benchmark = shipment_data.get("benchmark_zip_performance") or shipment_data.get("benchmark_zip") or {}
+    return {
+        "total_shipments": total_shipments,
+        "avg_ctd": avg_ctd,
+        "median_ctd": median_ctd,
+        "min_ctd": min_ctd,
+        "max_ctd": max_ctd,
+        "ctd_threshold": ctd_threshold,
+        "delayed_count": delayed_count,
+        "delay_rate": delay_rate,
+        "on_time_rate": on_time_rate,
+        "exception_count": exception_count,
+        "exception_rate": exception_rate,
+        "delivered_count": delivered_count,
+        "undelivered_count": undelivered_count,
+        "estimated_ctd_count": estimated_ctd_count,
+        "date_range": {
+            "earliest": min(dates) if dates else None,
+            "latest": max(dates) if dates else None
+        }
+    }
+
+
+def _deterministic_fallback(
+    records: List[Dict[str, Any]],
+    baseline: Dict[str, Any],
+    context: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Deterministic fallback if LLM fails.
+    
+    Returns basic metrics without AI-powered insights.
+    """
+    customer_id = context.get("customer_id", "unknown")
+    zip_benchmark = context.get("zip_benchmark", {})
+    
     # Unwrap S3 dict if needed
-    if isinstance(zip_perf, dict) and "data" in zip_perf:
-        zp_list = zip_perf["data"]
-        zip_perf = zp_list[0] if isinstance(zp_list, list) and zp_list else {}
-    if isinstance(benchmark, dict) and "data" in benchmark:
-        bm_list = benchmark["data"]
-        benchmark = bm_list[0] if isinstance(bm_list, list) and bm_list else {}
+    if isinstance(zip_benchmark, dict) and "data" in zip_benchmark:
+        bm_list = zip_benchmark["data"]
+        zip_benchmark = bm_list[0] if isinstance(bm_list, list) and bm_list else {}
     
-    postcode = zip_perf.get("POSTCODE") or records[0].get("POSTCODE", "Unknown") if records else "Unknown"
+    # Get postcode
+    postcode = records[0].get("POSTCODE", "Unknown") if records else "Unknown"
     
     # Calculate comparison
     try:
-        benchmark_avg_ctd = float(benchmark.get("AVG_CTD", 0) or 0)
+        benchmark_avg_ctd = float(zip_benchmark.get("AVG_CTD", 0) or 0)
     except (ValueError, TypeError):
         benchmark_avg_ctd = 0
-    ctd_difference = round(avg_ctd - benchmark_avg_ctd, 2) if benchmark_avg_ctd else 0
+    
+    ctd_difference = round(baseline["avg_ctd"] - benchmark_avg_ctd, 2) if benchmark_avg_ctd else 0
     
     # Determine comparison status
     if benchmark_avg_ctd:
@@ -164,12 +196,12 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
     
     # Identify red flags
     red_flags = []
-    if benchmark_avg_ctd and avg_ctd > benchmark_avg_ctd + 1:
-        red_flags.append(f"CTD {avg_ctd} days exceeds benchmark by {ctd_difference} days")
-    if delay_rate > 15:
-        red_flags.append(f"High delay rate: {delay_rate}%")
-    if exception_rate > 5:
-        red_flags.append(f"High exception rate: {exception_rate}%")
+    if benchmark_avg_ctd and baseline["avg_ctd"] > benchmark_avg_ctd + 1:
+        red_flags.append(f"CTD {baseline['avg_ctd']} days exceeds benchmark by {ctd_difference} days")
+    if baseline["delay_rate"] > 15:
+        red_flags.append(f"High delay rate: {baseline['delay_rate']}%")
+    if baseline["exception_rate"] > 5:
+        red_flags.append(f"High exception rate: {baseline['exception_rate']}%")
     
     # Determine health status
     if len(red_flags) == 0:
@@ -182,99 +214,42 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
         health_status = "CRITICAL"
         primary_finding = f"Multiple delivery issues identified: {len(red_flags)} red flags"
     
-    # Build observations (key findings as bullet points)
-    observations = [
-        f"Total shipments in analysis period: {total_shipments} ({delivered_count} delivered, {undelivered_count} undelivered/in-transit)",
-        f"Average CTD: {avg_ctd} days (median: {median_ctd} days), threshold: {ctd_threshold} days",
-        f"On-time delivery rate: {on_time_rate}% (delayed = CTD > {ctd_threshold} days)",
-        f"Delayed shipments: {delayed_count} ({delay_rate}%)",
-    ]
-    if estimated_ctd_count > 0:
-        observations.append(
-            f"Note: {estimated_ctd_count} shipment(s) used estimated CTD from expected delivery dates"
-        )
-    
-    if benchmark_avg_ctd:
-        observations.append(f"ZIP {postcode} benchmark CTD: {benchmark_avg_ctd} days")
-        observations.append(f"Customer vs benchmark: {ctd_vs_benchmark} ({estimated_percentile}th percentile)")
-    
-    if exception_count > 0:
-        observations.append(f"Exception rate: {exception_rate}%")
-    
-    for flag in red_flags:
-        observations.append(f"⚠️ RED FLAG: {flag}")
-    
-    # Build synthesis (detailed paragraph with specific data points)
-    date_range_str = f"{min(dates)} to {max(dates)}" if dates else "date range unknown"
-    
-    synthesis = (
-        f"Analyzed {total_shipments} shipments for customer {customer_id} from {date_range_str}. "
-        f"Customer's average Click-to-Deliver time is {avg_ctd} days (median {median_ctd}), "
-        f"compared to the ZIP {postcode} benchmark of {benchmark_avg_ctd} days. "
-        f"This places the customer at the {estimated_percentile}th percentile ({ctd_vs_benchmark}). "
-        f"On-time rate is {on_time_rate}% with {delayed_count} delayed shipments and {exception_count} exceptions. "
-    )
-    
-    if health_status == "HEALTHY":
-        synthesis += "Overall shipment health is HEALTHY with no significant concerns."
-    elif health_status == "ATTENTION":
-        synthesis += f"Health status requires ATTENTION due to: {red_flags[0] if red_flags else 'minor concerns'}."
-    else:
-        synthesis += f"CRITICAL health status identified with {len(red_flags)} red flags requiring immediate review."
-    
-    # Build summary for quick reference
-    summary = {
-        "health_status": health_status,
-        "total_shipments": total_shipments,
-        "avg_ctd": avg_ctd,
-        "benchmark_ctd": benchmark_avg_ctd,
-        "on_time_rate": on_time_rate,
-        "percentile": estimated_percentile,
-        "red_flag_count": len(red_flags)
-    }
-    
-    # Build result
-    result = {
+    return {
         "skill": "shipment_health_check",
-        "skill_type": "BASE_ANALYSIS",
-        "observations": observations,
-        "synthesis": synthesis,
-        "summary": summary,
         "grounded_metrics": {
             "customer_id": customer_id,
             "analysis_date": datetime.now().strftime("%Y-%m-%d"),
             "customer_performance": {
-                "total_shipments": total_shipments,
-                "avg_ctd": avg_ctd,
-                "median_ctd": median_ctd,
-                "min_ctd": min_ctd,
-                "max_ctd": max_ctd,
-                "delayed_shipments": delayed_count,
-                "delay_rate_pct": delay_rate,
-                "on_time_rate_pct": on_time_rate,
-                "exception_count": exception_count,
-                "exception_rate_pct": exception_rate,
-                "date_range": {
-                    "earliest": min(dates) if dates else None,
-                    "latest": max(dates) if dates else None
-                }
+                "total_shipments": baseline["total_shipments"],
+                "avg_ctd": baseline["avg_ctd"],
+                "median_ctd": baseline["median_ctd"],
+                "min_ctd": baseline["min_ctd"],
+                "max_ctd": baseline["max_ctd"],
+                "delayed_shipments": baseline["delayed_count"],
+                "delay_rate_pct": baseline["delay_rate"],
+                "on_time_rate_pct": baseline["on_time_rate"],
+                "exception_count": baseline["exception_count"],
+                "exception_rate_pct": baseline["exception_rate"],
+                "delivered_count": baseline["delivered_count"],
+                "undelivered_count": baseline["undelivered_count"],
+                "date_range": baseline["date_range"]
             },
             "zip_performance": {
                 "postcode": postcode,
-                "total_shipments": zip_perf.get("TOTAL_SHIPMENTS", total_shipments),
-                "avg_ctd": zip_perf.get("AVG_CTD", avg_ctd),
-                "delay_rate_pct": zip_perf.get("DELAY_RATE", delay_rate)
+                "total_shipments": baseline["total_shipments"],
+                "avg_ctd": baseline["avg_ctd"],
+                "delay_rate_pct": baseline["delay_rate"]
             },
             "zip_benchmark": {
                 "postcode": postcode,
                 "benchmark_avg_ctd": benchmark_avg_ctd,
-                "benchmark_median_ctd": benchmark.get("MEDIAN_CTD", 0),
-                "benchmark_min_ctd": benchmark.get("MIN_CTD", 0),
-                "benchmark_max_ctd": benchmark.get("MAX_CTD", 0),
-                "benchmark_shipment_count": benchmark.get("TOTAL_SHIPMENTS", 0)
+                "benchmark_median_ctd": zip_benchmark.get("MEDIAN_CTD", 0),
+                "benchmark_min_ctd": zip_benchmark.get("MIN_CTD", 0),
+                "benchmark_max_ctd": zip_benchmark.get("MAX_CTD", 0),
+                "benchmark_shipment_count": zip_benchmark.get("TOTAL_SHIPMENTS", 0)
             },
             "comparison": {
-                "customer_avg_ctd": avg_ctd,
+                "customer_avg_ctd": baseline["avg_ctd"],
                 "benchmark_avg_ctd": benchmark_avg_ctd,
                 "ctd_difference_days": ctd_difference,
                 "ctd_vs_benchmark": ctd_vs_benchmark,
@@ -282,20 +257,64 @@ def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGM
             },
             "health_status": health_status,
             "red_flags": red_flags,
-            "delivered_count": delivered_count,
-            "undelivered_count": undelivered_count,
-            "ctd_threshold": ctd_threshold,
-            "estimated_ctd_count": estimated_ctd_count,
-            "delay_definition": f"CTD > {ctd_threshold} days (mean + 1 std dev)"
+            "ctd_threshold": baseline["ctd_threshold"],
+            "delay_definition": f"CTD > {baseline['ctd_threshold']} days (mean + 1 std dev)"
         },
-        "continued_analysis": synthesis,
-        "enhanced_next_steps": [
-            "Review carrier analysis for carrier-specific patterns",
-            "Check exception analysis for recurring issues",
-            "Analyze timing patterns for optimal shipping days"
-        ] if health_status != "HEALTHY" else ["Monitor for changes in delivery patterns"],
+        "continued_analysis": f"Deterministic analysis for customer {customer_id}: {baseline['total_shipments']} shipments, avg CTD {baseline['avg_ctd']} days, {baseline['on_time_rate']}% on-time rate. {health_status} status.",
+        "enhanced_next_steps": ["LLM analysis unavailable - showing basic metrics only"],
         "health_status": health_status,
-        "primary_finding": primary_finding
+        "primary_finding": primary_finding,
+        "llm_fallback": True
     }
+
+
+def execute(state: Dict[str, Any], target_key: str = "", peer_level: str = "SEGMENT") -> Dict[str, Any]:
+    """
+    Execute the shipment health check skill with LLM analysis.
+    
+    Falls back to deterministic calculation if LLM fails.
+    """
+    customer_id = state.get("customer_id", "unknown")
+    
+    # Get shipment data from state
+    shipment_data = state.get("shipment_data", {})
+    records = shipment_data.get("records", [])
+    
+    if not records:
+        return {
+            "skill": "shipment_health_check",
+            "error": "No shipment data available",
+            "grounded_metrics": {
+                "total_shipments": 0,
+                "health_status": "UNKNOWN"
+            }
+        }
+    
+    # Step 1: Compute baseline metrics (deterministic)
+    logger.info(f"Computing baseline metrics for {customer_id}, {len(records)} records")
+    baseline_metrics = _compute_baseline_metrics(records)
+    
+    # Step 2: Prepare context for LLM
+    zip_perf = shipment_data.get("customer_zip_performance") or shipment_data.get("customer_zip") or {}
+    zip_benchmark = shipment_data.get("benchmark_zip_performance") or shipment_data.get("benchmark_zip") or {}
+    
+    context = {
+        "customer_id": customer_id,
+        "zip_benchmark": zip_benchmark
+    }
+    
+    # Step 3: Execute with LLM
+    executor = LLMSkillExecutor(
+        skill_name="shipment_health_check",
+        reasoning_effort="medium"
+    )
+    
+    result = executor.execute_with_llm(
+        records=records,
+        baseline=baseline_metrics,
+        context=context,
+        deterministic_fallback=_deterministic_fallback,
+        max_records=50  # Limit for cost control
+    )
     
     return result
