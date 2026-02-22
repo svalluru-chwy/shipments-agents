@@ -108,9 +108,7 @@ class LLMSkillExecutor:
             trimmed_records = trim_records(records[:max_records])
             
             self.logger.info(
-                f"Executing {self.skill_name} with LLM",
-                record_count=len(trimmed_records),
-                model=self.model
+                f"Executing {self.skill_name} with LLM: {len(trimmed_records)} records, model={self.model}"
             )
             
             # Step 2: Load system prompt from SKILL.md
@@ -133,9 +131,7 @@ class LLMSkillExecutor:
             result["skill"] = self.skill_name
             
             self.logger.info(
-                f"{self.skill_name} completed successfully",
-                execution_time=execution_time,
-                llm_model=self.model
+                f"{self.skill_name} completed successfully in {execution_time:.2f}s with {self.model}"
             )
             
             return result
